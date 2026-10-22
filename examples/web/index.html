@@ -48,7 +48,8 @@
   .details td { padding: 3px 0; vertical-align: top; }
   .details td:first-child { color: var(--muted); width: 128px; padding-right: 10px; }
   .details code { background: var(--code); padding: 1px 5px; border-radius: 4px; word-break: break-all; font-size: 11.5px; }
-  .error { color: var(--bad); padding: 0 14px 10px; font-size: 13px; }
+  .error { color: var(--bad); padding: 10px 14px; font-size: 13.5px; }
+  .error small { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; word-break: break-word; }
   .composer { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0 18px; display: flex; gap: 10px; border-top: 1px solid var(--line); }
   textarea { flex: 1; resize: none; height: 46px; max-height: 160px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; }
   textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
@@ -173,12 +174,29 @@ function addDetails(view, v) {
   view.box.append(details);
 }
 
+// Why an answer was refused, in plain words; the SDK's message follows.
+const reasons = {
+  INVALID_REQUEST: "The request was invalid, so nothing was sent.",
+  MODEL_NOT_ALLOWED: "This model is not enabled, so nothing was sent.",
+  ATTESTATION_FAILED: "The TEE or the code it runs did not check out, so the answer was refused.",
+  TLS_PIN_MISMATCH: "The server's TLS key is not the attested one, so nothing was sent.",
+  RECEIPT_INVALID: "The signature over the answer did not check out, so the answer was refused.",
+  ROUTE_NOT_TEE: "The request was not served inside a TEE, so the answer was refused.",
+  EVIDENCE_UNAVAILABLE: "The proof could not be fetched, so the answer was refused.",
+  VERIFIER_UNAVAILABLE: "An attestation service (Intel, or NVIDIA for NEAR's GPUs) could not be reached, so the answer was refused.",
+  PROVIDER_ERROR: "The provider returned an error, such as a bad key, low balance or rate limit.",
+  NETWORK: "The connection to this demo server was lost.",
+};
+
 function showError(view, err) {
   view.box.classList.remove("pending");
   view.badge.className = "badge bad";
   view.badge.textContent = "Not verified ✗";
   view.bar.append(el("span", null, err.code || "ERROR"));
-  view.box.insertBefore(el("div", "error", err.message || "Request failed"), view.bar);
+  if (!view.text.textContent) view.text.remove();
+  const box = el("div", "error", reasons[err.code] || "The request failed.");
+  box.append(el("small", null, err.message || ""));
+  view.box.insertBefore(box, view.bar);
   addDetails(view, err.verification);
 }
 
