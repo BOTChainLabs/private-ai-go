@@ -25,6 +25,12 @@ var defaults = map[privateai.ProviderID]struct{ model, keyEnv string }{
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	provider := flag.String("provider", "phala", "phala or near")
 	model := flag.String("model", "", "model id (default depends on the provider)")
 	stream := flag.Bool("stream", false, "stream the answer")
@@ -33,14 +39,14 @@ func main() {
 	id := privateai.ProviderID(*provider)
 	d, ok := defaults[id]
 	if !ok {
-		log.Fatalf("unknown provider %q", *provider)
+		return fmt.Errorf("unknown provider %q", *provider)
 	}
 	if *model == "" {
 		*model = d.model
 	}
 	key := os.Getenv(d.keyEnv)
 	if key == "" {
-		log.Fatalf("set %s", d.keyEnv)
+		return fmt.Errorf("set %s", d.keyEnv)
 	}
 	prompt := "Say hi in one short sentence."
 	if flag.NArg() > 0 {
@@ -52,7 +58,7 @@ func main() {
 		Models:    []privateai.ModelEntry{{Provider: id, Model: *model}},
 	})
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer client.Close()
 
@@ -78,9 +84,9 @@ func main() {
 	if err != nil {
 		var e *privateai.Error
 		if errors.As(err, &e) && e.Verification != nil {
-			log.Fatalf("%v\nverification: %s %v", err, e.Verification.Status, e.Verification.Reasons)
+			return fmt.Errorf("%w\nverification: %s %v", err, e.Verification.Status, e.Verification.Reasons)
 		}
-		log.Fatal(err)
+		return err
 	}
 
 	fmt.Println()
@@ -90,6 +96,7 @@ func main() {
 	fmt.Printf("compose:  %s\n", v.Evidence.ComposeHash)
 	fmt.Printf("receipt:  %s\n", v.Evidence.ReceiptID)
 	fmt.Printf("tokens:   %d\n", usage.TotalTokens)
+	return nil
 }
 
 // runStream prints the answer as it arrives, then verifies it. The printed

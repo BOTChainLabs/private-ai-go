@@ -6,6 +6,12 @@ func TestCanonicalize(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{`{ "b": 1, "a": [ {"y": null, "x": true} ] }`, `{"a":[{"x":true,"y":null}],"b":1}`},
 		{`{"big": 1800000000000, "s": "<a&b>"}`, `{"big":1800000000000,"s":"<a&b>"}`},
+		// Escaping as JSON.stringify does (checked with Node): U+2028 and
+		// U+2029 stay literal, control characters use the short forms.
+		{
+			`{"b":"q\"b\\s/\u2028\u2029\u0001\b\f\n\r\t\u001fé😀","a":[1,-2,null,true,"<&>"]}`,
+			`{"a":[1,-2,null,true,"<&>"],"b":"q\"b\\s/` + "\u2028\u2029" + `\u0001\b\f\n\r\t\u001fé😀"}`,
+		},
 	}
 	for _, c := range cases {
 		got, err := Canonicalize([]byte(c.in))

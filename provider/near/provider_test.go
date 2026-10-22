@@ -41,6 +41,11 @@ func (f *fakeClient) Verify(context.Context, string) (nearai.AttestationVerifica
 
 // fakeSource serves the real NEAR attestations saved in testdata.
 type fakeSource struct {
+	// hang makes gateway fetches block until their context ends; released
+	// counts the fetches that have returned.
+	hang     bool
+	released atomic.Int32
+
 	fetches atomic.Int32
 	gateway nearai.Attestation
 	models  []nearai.Attestation
@@ -50,8 +55,13 @@ type fakeSource struct {
 	next     atomic.Int32
 }
 
-func (s *fakeSource) FetchGatewayAttestation(context.Context, nearai.FetchOptions) (nearai.FetchedGatewayAttestation, error) {
+func (s *fakeSource) FetchGatewayAttestation(ctx context.Context, _ nearai.FetchOptions) (nearai.FetchedGatewayAttestation, error) {
 	s.fetches.Add(1)
+	if s.hang {
+		<-ctx.Done()
+		s.released.Add(1)
+		return nearai.FetchedGatewayAttestation{}, ctx.Err()
+	}
 	return nearai.FetchedGatewayAttestation{Attestation: s.gateway}, nil
 }
 
@@ -87,19 +97,15 @@ const fakeGatewaySPKI = "aa11"
 
 // newIdentity checks the fixtures with the production workload. The quote,
 // binding and GPU checks are NEAR's SDK's; the fakes accept them.
-func newIdentity(src *fakeSource) *identity {
-	return &identity{
-		src: src,
-		verifyGateway: func(context.Context, nearai.Attestation, nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
+func newFakeIdentity(src *fakeSource) *identity {
+	return newIdentity(src,
+		func(context.Context, nearai.Attestation, nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
 			return nearai.VerifiedAttestation{SPKIFingerprint: fakeGatewaySPKI}, nil
 		},
-		verifyModel: func(_ context.Context, a nearai.Attestation, _ nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
+		func(_ context.Context, a nearai.Attestation, _ nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
 			return nearai.VerifiedAttestation{Signer: a.Signer}, nil
 		},
-		workload: ProductionWorkload(),
-		now:      time.Now,
-		cache:    map[string]*established{},
-	}
+		ProductionWorkload())
 }
 
 func (f *fakeClient) HTTPClient() *http.Client {
@@ -156,7 +162,7 @@ func newFake(t *testing.T, k gatewayKnobs) (*fakeClient, *Provider) {
 		io.WriteString(w, `{"id":"chatcmpl-n1","choices":[{"message":{"role":"assistant","content":"hello from near"}}],"usage":{"total_tokens":9}}`)
 	}))
 	t.Cleanup(f.srv.Close)
-	p, err := newWithClient(f, newIdentity(f.src), time.Minute)
+	p, err := newWithClient(f, newFakeIdentity(f.src), time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,5 +436,5 @@ func TestLiveIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("established: model app %s, %d signer(s), gateway TLS keys %v", e.modelAppID, len(e.signers), e.gatewaySPKIs)
+	t.Logf("established: model signers and apps %v, gateway TLS keys %v", e.apps, e.gatewaySPKIs)
 }

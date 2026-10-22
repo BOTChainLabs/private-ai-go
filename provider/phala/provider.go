@@ -28,7 +28,7 @@ const (
 	attestTries = 3
 )
 
-var errClosed = errors.New("phala: provider is closed")
+var errClosed = core.Errorf(core.CodeProviderError, nil, "Phala provider is closed")
 
 type Options struct {
 	APIKey  string

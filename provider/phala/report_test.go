@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/BOTChainLabs/private-ai-go/core"
+	"github.com/BOTChainLabs/private-ai-go/internal/tdx"
 )
 
 // Two genuine reports from inference.phala.com, on either side of a gateway
@@ -103,7 +104,7 @@ func TestProductionWorkloadAcceptsBothReleases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := replayRTMR3(r.Attestation.Evidence.EventLog, q.RTMR3)
+	events, err := tdx.ReplayRTMR3([]byte(r.Attestation.Evidence.EventLog), q.RTMR3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +165,7 @@ func TestReplayRTMR3BindsPayloads(t *testing.T) {
 	log := r.Attestation.Evidence.EventLog
 
 	swapped := strings.Replace(log, "fdb7a14e5a6675f752e2cb69c9067a98ca402918", "fdb7a14e5a6675f752e2cb69c9067a98ca402919", 1)
-	if _, err := replayRTMR3(swapped, q.RTMR3); err == nil || !strings.Contains(err.Error(), "digest does not match") {
+	if _, err := tdx.ReplayRTMR3([]byte(swapped), q.RTMR3); err == nil || !strings.Contains(err.Error(), "digest does not match") {
 		t.Fatalf("swapped app-id payload: %v", err)
 	}
 	var events []map[string]any
@@ -176,7 +177,7 @@ func TestReplayRTMR3BindsPayloads(t *testing.T) {
 		}
 	}
 	dup, _ := json.Marshal(events)
-	if _, err := replayRTMR3(string(dup), q.RTMR3); err == nil {
+	if _, err := tdx.ReplayRTMR3(dup, q.RTMR3); err == nil {
 		t.Fatal("duplicate app-id event accepted")
 	}
 }

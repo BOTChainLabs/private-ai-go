@@ -28,11 +28,14 @@ const (
 	Unverified Status = "Unverified"
 )
 
+// Message is one chat message (OpenAI format).
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
+// InferRequest is one chat completion request. Provider and Model must be
+// in the client's model list.
 type InferRequest struct {
 	Provider ProviderID
 	Model    string
@@ -45,12 +48,14 @@ type InferRequest struct {
 	Params map[string]any
 }
 
+// Usage is the token count the provider reported.
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// InferResult is a completed, verified inference.
 type InferResult struct {
 	Content      string
 	Raw          json.RawMessage
@@ -58,6 +63,8 @@ type InferResult struct {
 	Verification Verification
 }
 
+// Verification is the outcome of verifying one inference and the evidence
+// it was checked against.
 type Verification struct {
 	Status   Status
 	Provider ProviderID
@@ -71,7 +78,7 @@ type Verification struct {
 // Evidence records what a verified call was checked against, for audit.
 type Evidence struct {
 	// The attested workload.
-	AppID       string // Phala
+	AppID       string // the dstack app (Phala's gateway, or the NEAR model app that signed)
 	ComposeHash string
 	OSImageHash string
 	TCBStatus   string
@@ -86,6 +93,7 @@ type Evidence struct {
 	Receipt      json.RawMessage
 }
 
+// ModelEntry names a model at a provider.
 type ModelEntry struct {
 	Provider ProviderID
 	Model    string

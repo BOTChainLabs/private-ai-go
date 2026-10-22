@@ -57,6 +57,13 @@ func TestEmptyMessagesRejected(t *testing.T) {
 }
 
 func TestConfigValidation(t *testing.T) {
+	phala := map[ProviderID]ProviderConfig{Phala: {APIKey: "k"}}
+	if _, err := New(Config{Providers: phala, Models: []ModelEntry{{Provider: Phala}}}); err == nil {
+		t.Fatal("accepted a model without a name")
+	}
+	if _, err := New(Config{Providers: phala, Models: []ModelEntry{{Provider: Phala, Model: "m"}}, Timeout: -1}); err == nil {
+		t.Fatal("accepted a negative timeout")
+	}
 	if _, err := New(Config{Providers: map[ProviderID]ProviderConfig{Phala: {APIKey: "k"}}}); err == nil {
 		t.Fatal("accepted a config with no models")
 	}

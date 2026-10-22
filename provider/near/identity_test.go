@@ -3,8 +3,10 @@ package near
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	nearai "github.com/nearai/inference-sdk/go"
 
@@ -193,5 +195,94 @@ func TestIdentityIsCached(t *testing.T) {
 	res, _ := p.Infer(context.Background(), testReq)
 	if res.Verification.Evidence.AppID != "2c0a0c96cb6dbd659bf1446e2f3fce58172ff91b" {
 		t.Fatalf("evidence app id %q", res.Verification.Evidence.AppID)
+	}
+}
+
+// The call's own timeout is not the caller's cancellation: it carries an
+// SDK code. Close stops identity work that outlived its call.
+func TestIdentityTimeoutAndClose(t *testing.T) {
+	f, p := newFake(t, gatewayKnobs{})
+	f.src.hang = true
+	p.timeout = 50 * time.Millisecond
+	_, err := p.Infer(context.Background(), testReq)
+	assertCode(t, err, core.CodeEvidenceUnavailable)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := p.Infer(ctx, testReq); !errors.Is(err, context.Canceled) {
+		t.Fatalf("caller cancellation: %v", err)
+	}
+
+	p.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for f.src.released.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if f.src.released.Load() == 0 {
+		t.Fatal("identity check still running after Close")
+	}
+	fetches := f.src.fetches.Load()
+	_, err = p.Infer(context.Background(), testReq)
+	assertCode(t, err, core.CodeProviderError)
+	if f.src.fetches.Load() != fetches || f.requests.Load() != 0 {
+		t.Fatal("a closed provider kept working")
+	}
+}
+
+// A signature that could not be fetched is Unverified; one that was checked
+// and did not hold is Failed.
+func TestVerifyResponseErrors(t *testing.T) {
+	cases := []struct {
+		err    error
+		code   string
+		status core.Status
+	}{
+		{&nearai.Error{Code: "api.transport_failed", Retryable: true}, core.CodeEvidenceUnavailable, core.Unverified},
+		{&nearai.Error{Code: "api.http_status", Details: map[string]any{"status": 503}}, core.CodeEvidenceUnavailable, core.Unverified},
+		{context.DeadlineExceeded, core.CodeEvidenceUnavailable, core.Unverified},
+		{&nearai.Error{Code: "signature.invalid"}, core.CodeReceiptInvalid, core.Failed},
+	}
+	for _, c := range cases {
+		f, p := newFake(t, gatewayKnobs{})
+		f.verify = func(string) (nearai.VerifiedCompletionResult, error) { return nearai.VerifiedCompletionResult{}, c.err }
+		_, err := p.Infer(context.Background(), testReq)
+		if e := assertCode(t, err, c.code); e.Verification == nil || e.Verification.Status != c.status {
+			t.Fatalf("%v: verification %+v", c.err, e.Verification)
+		}
+	}
+}
+
+func TestDetailedNamesHTTPStatus(t *testing.T) {
+	err := detailed(&nearai.Error{Code: "api.http_status", Details: map[string]any{"status": 401}})
+	if !strings.Contains(err.Error(), "api.http_status (status 401)") || codeFor(err) != core.CodeProviderError {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestComposeAllowlistIgnoresCase(t *testing.T) {
+	check := deploymentPolicy(core.Policy{ComposeHashes: []string{"C0FFEE"}})
+	d := nearai.MeasuredDeployment{RuntimeMeasurements: nearai.RuntimeMeasurements{ComposeHash: "c0ffee"}}
+	if err := check(context.Background(), "m", d); err != nil {
+		t.Fatal(err)
+	}
+	d.RuntimeMeasurements.ComposeHash = "beef"
+	if check(context.Background(), "m", d) == nil {
+		t.Fatal("unlisted compose accepted")
+	}
+}
+
+func TestEstablishedRecordsAppPerSigner(t *testing.T) {
+	a := nearai.SigningIdentity{SigningAlgo: nearai.Ed25519, SigningAddress: "AA"}
+	b := nearai.SigningIdentity{SigningAlgo: nearai.Ed25519, SigningAddress: "bb"}
+	e := &established{apps: map[string]string{signerKey(a): "app-a"}, gatewaySPKIs: []string{"g1"}}
+	m := e.merge(&established{apps: map[string]string{signerKey(b): "app-b"}, gatewaySPKIs: []string{"g1", "g2"}})
+	if m.appOf(a) != "app-a" || m.appOf(b) != "app-b" || len(m.gatewaySPKIs) != 2 {
+		t.Fatalf("merged %+v", m)
+	}
+	if e.hasSigner(b) || len(e.gatewaySPKIs) != 1 {
+		t.Fatal("merge changed the published identity")
+	}
+	if err := m.checkSession(nearai.AttestationVerificationResult{Models: []nearai.VerifiedAttestation{{Signer: a}}}); err == nil {
+		t.Fatal("session without a gateway accepted")
 	}
 }

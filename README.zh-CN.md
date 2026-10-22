@@ -113,7 +113,7 @@ NEAR 的 GPU 校验需要访问 NVIDIA 的证明服务（nras.attestation.nvidia
 
 ## 错误处理
 
-所有错误都可以用 `errors.As` 取出 `*privateai.Error`，按 `Code` 区分：
+所有错误都可以用 `errors.As` 取出 `*privateai.Error`，按 `Code` 区分（常量如 `privateai.CodeAttestationFailed`）：
 
 | 错误码 | 含义 |
 |---|---|
@@ -137,12 +137,12 @@ NEARAI_API_KEY=... go run ./examples/demo -provider near -stream "Say hi"
 PHALA_API_KEY=... NEARAI_API_KEY=... go run ./examples/web   # 网页聊天，打开 http://127.0.0.1:8080
 ```
 
-网页版每条回答都显示校验结果。Phala 流式回答在 Receipt 验签通过前标为“未验证”；NEAR 校验通过后一次性返回。默认只监听本机；要对外开放，用 `-addr` 并设置 `DEMO_PASSWORD`，因为每条消息都消耗 Key 的余额。
+网页版每条回答旁边都有证明面板：通过了哪些校验、对应的证据，以及可下载的证明文件。Phala 流式回答在 Receipt 验签通过前标为“未验证”；NEAR 校验通过后一次性返回。默认只监听本机；不设置 `DEMO_PASSWORD`（HTTP 基本认证）时拒绝对外监听，因为每条消息都消耗 Key 的余额。
 
 ## 测试
 
 ```sh
-go test -race ./...                                              # 全部单元测试
+make check                                                       # gofmt、go vet、go test -race（与 CI 相同）
 PRIVATEAI_LIVE=1 go test ./provider/phala -run Live -v           # Phala 线上预检，无需 Key
 PHALA_API_KEY=... go test ./provider/phala -run LiveInference -v  # Phala 线上调用（非流式、流式、拒绝非 TEE 模型）
 NEARAI_API_KEY=... go test ./provider/near -run Live -v          # NEAR 线上调用
@@ -159,6 +159,7 @@ provider/phala/   Phala：ACI 预检、TLS 绑定、Receipt 验签
 provider/near/    NEAR AI：封装官方 Go SDK
 internal/oai/     OpenAI 兼容的请求、响应和 SSE 解析
 internal/canon/   ACI 文档的规范化（JCS）
+internal/tdx/     TDX Quote 解析、系统镜像和应用身份校验（两家共用）
 examples/demo/    命令行 Demo
 examples/web/     网页聊天 Demo
 tools/crosscheck/ 与 Phala 官方验证库的交叉验证

@@ -18,10 +18,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	nearai "github.com/nearai/inference-sdk/go"
@@ -33,6 +35,8 @@ import (
 // route names how a NEAR result is verified: a signature by the attested
 // model over the exact request and response, with the request E2EE.
 const route = "near-provider-tee"
+
+var errClosed = core.Errorf(core.CodeProviderError, nil, "NEAR provider is closed")
 
 type Options struct {
 	APIKey  string
@@ -59,6 +63,7 @@ type Provider struct {
 	ident   *identity
 	chatURL string
 	timeout time.Duration
+	closed  atomic.Bool
 }
 
 // New creates the provider. E2EE is always on, so NEAR's SDK refuses before
@@ -101,18 +106,14 @@ func New(o Options) (*Provider, error) {
 	// keys it establishes is verified by the session preflight above.
 	identityOpts := gateway
 	identityOpts.GPUVerifier = func(context.Context, string) error { return nil }
-	ident := &identity{
-		src: src,
-		verifyGateway: func(ctx context.Context, a nearai.Attestation, b nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
+	ident := newIdentity(src,
+		func(ctx context.Context, a nearai.Attestation, b nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
 			return nearai.VerifyGatewayAttestation(ctx, a, b, identityOpts)
 		},
-		verifyModel: func(ctx context.Context, a nearai.Attestation, b nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
+		func(ctx context.Context, a nearai.Attestation, b nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
 			return nearai.VerifyModelAttestation(ctx, a, b, identityOpts)
 		},
-		workload: w,
-		now:      time.Now,
-		cache:    map[string]*established{},
-	}
+		w)
 	return newWithClient(c, ident, o.Timeout)
 }
 
@@ -123,7 +124,7 @@ func deploymentPolicy(p core.Policy) func(context.Context, string, nearai.Measur
 		return nil
 	}
 	return func(_ context.Context, model string, d nearai.MeasuredDeployment) error {
-		if !slices.Contains(p.ComposeHashes, strings.ToLower(d.RuntimeMeasurements.ComposeHash)) {
+		if !p.AcceptsCompose(d.RuntimeMeasurements.ComposeHash) {
 			return fmt.Errorf("model %s runs compose %s, which the policy does not allow", model, d.RuntimeMeasurements.ComposeHash)
 		}
 		return nil
@@ -143,12 +144,20 @@ func newWithClient(c client, ident *identity, timeout time.Duration) (*Provider,
 
 func (p *Provider) ID() core.ProviderID { return core.NEAR }
 
-// Close cancels NEAR's shared verification work and releases connections.
-func (p *Provider) Close() error { return p.c.Close() }
+// Close cancels NEAR's shared verification work and the identity checks,
+// and releases connections. Calls after Close fail.
+func (p *Provider) Close() error {
+	p.closed.Store(true)
+	p.ident.close()
+	return p.c.Close()
+}
 
 // Infer sends one chat completion and returns it only when the attested
 // model's signature over the exact bytes verifies.
 func (p *Provider) Infer(ctx context.Context, req core.InferRequest) (*core.InferResult, error) {
+	if p.closed.Load() {
+		return nil, errClosed
+	}
 	callCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	e, err := p.checkIdentity(callCtx, ctx, req.Model)
@@ -163,7 +172,7 @@ func (p *Provider) Infer(ctx context.Context, req core.InferRequest) (*core.Infe
 	// NEAR's SDK has already bounded and decrypted this body.
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, core.Wrap(ctx, codeFor(err), err, "read inference response")
+		return nil, core.Wrap(ctx, codeFor(err), detailed(err), "read inference response")
 	}
 	c, err := oai.ParseCompletion(body)
 	if err != nil {
@@ -179,25 +188,39 @@ func (p *Provider) Infer(ctx context.Context, req core.InferRequest) (*core.Infe
 // checkIdentity establishes which code serves model and requires the SDK's
 // session, the one the prompt will be encrypted under, to use only those
 // keys. It runs before anything is sent.
+//
+// NEAR's SDK may replace its session between this check and the send (on
+// expiry). The replacement has passed the SDK's own quote, GPU and OS
+// checks, and its response signer must still be established, so such a
+// result is refused; only the app identity of the key the prompt was
+// encrypted to is then unchecked.
 func (p *Provider) checkIdentity(ctx, callerCtx context.Context, model string) (*established, error) {
 	e, err := p.ident.get(ctx, model)
 	if err != nil {
-		if callerCtx.Err() != nil {
-			return nil, callerCtx.Err()
-		}
-		return nil, err
+		return nil, identityErr(callerCtx, err)
 	}
 	sess, err := p.c.Verify(ctx, model)
 	if err != nil {
-		return nil, core.Wrap(callerCtx, codeFor(err), err, "attest NEAR session")
+		return nil, core.Wrap(callerCtx, codeFor(err), detailed(err), "attest NEAR session")
 	}
 	if e, err = p.ident.covering(ctx, model, e, sess); err != nil {
-		if callerCtx.Err() != nil {
-			return nil, callerCtx.Err()
-		}
-		return nil, err
+		return nil, identityErr(callerCtx, err)
 	}
 	return e, nil
+}
+
+// identityErr gives an identity failure an SDK code. The caller's own
+// cancellation is returned as is; the call's internal timeout is not the
+// caller's and is wrapped.
+func identityErr(callerCtx context.Context, err error) error {
+	if callerCtx.Err() != nil {
+		return callerCtx.Err()
+	}
+	var ce *core.Error
+	if errors.As(err, &ce) {
+		return err
+	}
+	return core.Errorf(core.CodeEvidenceUnavailable, err, "establish NEAR identity")
 }
 
 // send posts the request through NEAR's verified transport and checks the
@@ -215,7 +238,7 @@ func (p *Provider) send(ctx, callerCtx context.Context, req core.InferRequest) (
 	hreq.Header.Set("Content-Type", "application/json")
 	resp, err := p.c.HTTPClient().Do(hreq)
 	if err != nil {
-		return nil, core.Wrap(callerCtx, codeFor(err), err, "inference request")
+		return nil, core.Wrap(callerCtx, codeFor(err), detailed(err), "inference request")
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
@@ -253,12 +276,17 @@ func (p *Provider) verify(ctx, callerCtx context.Context, id, model string, e *e
 		if callerCtx.Err() != nil {
 			return ver, err
 		}
-		ce := core.Errorf(codeFor(err), err, "verify response")
-		status := core.Failed
-		if ce.Code == core.CodeEvidenceUnavailable || ce.Code == core.CodeVerifierUnavailable {
-			status = core.Unverified
+		// Failed only when evidence was checked and did not hold; a
+		// signature that could not be fetched or checked is Unverified.
+		code := codeFor(err)
+		if code == core.CodeProviderError || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			code = core.CodeEvidenceUnavailable
 		}
-		return fail(status, ce)
+		status := core.Unverified
+		if code == core.CodeAttestationFailed || code == core.CodeReceiptInvalid || code == core.CodeTLSPinMismatch {
+			status = core.Failed
+		}
+		return fail(status, core.Errorf(code, detailed(err), "verify response"))
 	}
 	switch r.SignatureKind {
 	case "provider_tee":
@@ -273,7 +301,7 @@ func (p *Provider) verify(ctx, callerCtx context.Context, id, model string, e *e
 	}
 
 	ver.Status = core.Verified
-	ver.Evidence.AppID = e.modelAppID
+	ver.Evidence.AppID = e.appOf(r.Attestation.Signer)
 	if sig, err := json.Marshal(r.Signature); err == nil {
 		ver.Evidence.Receipt = sig
 	}
@@ -283,6 +311,20 @@ func (p *Provider) verify(ctx, callerCtx context.Context, id, model string, e *e
 		ver.Evidence.OSImageHash = a.Deployment.RuntimeMeasurements.OSImageHash
 	}
 	return ver, nil
+}
+
+// detailed adds what NEAR's SDK keeps out of its error text, such as the
+// HTTP status, so that a bad key reads differently from an outage.
+func detailed(err error) error {
+	var ne *nearai.Error
+	if !errors.As(err, &ne) || len(ne.Details) == 0 {
+		return err
+	}
+	var parts []string
+	for _, k := range slices.Sorted(maps.Keys(ne.Details)) {
+		parts = append(parts, fmt.Sprintf("%s %v", k, ne.Details[k]))
+	}
+	return fmt.Errorf("%w (%s)", err, strings.Join(parts, ", "))
 }
 
 func codeFor(err error) string {

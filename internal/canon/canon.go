@@ -1,9 +1,9 @@
 // Package canon produces the JCS (RFC 8785) form of ACI documents.
 //
 // ACI restricts its documents to ASCII member names and integer numbers
-// (spec Appendix A). Under those constraints JCS is compact JSON with
-// lexicographically sorted member names, which encoding/json produces for
-// maps. Decode enforces the constraints, and also rejects duplicate member
+// (spec Appendix A). Under those constraints JCS is compact JSON with member
+// names sorted bytewise and strings escaped as ECMAScript's JSON.stringify
+// does. Decode enforces the constraints, and also rejects duplicate member
 // names, so that what a verifier reads is exactly what was signed.
 package canon
 
@@ -13,6 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -94,13 +97,85 @@ func isASCII(s string) bool {
 
 // Marshal returns the canonical form of a value produced by Decode.
 func Marshal(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	var b bytes.Buffer
+	if err := write(&b, v); err != nil {
 		return nil, err
 	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+	return b.Bytes(), nil
+}
+
+func write(b *bytes.Buffer, v any) error {
+	switch t := v.(type) {
+	case map[string]any:
+		b.WriteByte('{')
+		for i, k := range slices.Sorted(maps.Keys(t)) { // ASCII names: byte order is JCS order
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			writeString(b, k)
+			b.WriteByte(':')
+			if err := write(b, t[k]); err != nil {
+				return err
+			}
+		}
+		b.WriteByte('}')
+	case []any:
+		b.WriteByte('[')
+		for i, e := range t {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if err := write(b, e); err != nil {
+				return err
+			}
+		}
+		b.WriteByte(']')
+	case string:
+		writeString(b, t)
+	case json.Number:
+		b.WriteString(t.String())
+	case bool:
+		b.WriteString(strconv.FormatBool(t))
+	case nil:
+		b.WriteString("null")
+	default:
+		return fmt.Errorf("canon: unsupported value of type %T", v)
+	}
+	return nil
+}
+
+// writeString escapes like JSON.stringify (RFC 8785 §3.2.2.2): the quote,
+// the backslash and control characters only. encoding/json differs: it
+// always escapes U+2028 and U+2029.
+func writeString(b *bytes.Buffer, s string) {
+	const hexDigits = "0123456789abcdef"
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '"', '\\':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if c < 0x20 {
+				b.WriteString(`\u00`)
+				b.WriteByte(hexDigits[c>>4])
+				b.WriteByte(hexDigits[c&0xf])
+			} else {
+				b.WriteByte(c) // UTF-8 bytes are copied as is
+			}
+		}
+	}
+	b.WriteByte('"')
 }
 
 // Canonicalize re-encodes a JSON document in canonical form.

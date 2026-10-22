@@ -54,6 +54,8 @@ const (
 	CodeProviderError       = core.CodeProviderError
 )
 
+// ProviderConfig configures one provider. The API key is the developer's
+// own (BYOK): the provider bills that account directly.
 type ProviderConfig struct {
 	APIKey  string
 	BaseURL string // optional, for testing
@@ -72,19 +74,26 @@ type ProviderConfig struct {
 	ExtraAppIDs   []string
 }
 
+// Config lists the providers to enable and the models the client may call.
 type Config struct {
 	Providers map[ProviderID]ProviderConfig
 	// Models lists the only models the client may call.
-	Models  []ModelEntry
+	Models []ModelEntry
+	// Timeout bounds each non-streaming call, including its verification.
+	// Zero means 2 minutes. Streams are bounded by the caller's context.
 	Timeout time.Duration
 }
 
+// Client calls the configured providers and returns only verified results.
+// It is safe for concurrent use.
 type Client struct {
 	providers map[ProviderID]core.Provider
 	models    []ModelEntry
 	allowed   map[ModelEntry]bool
 }
 
+// New validates cfg and creates the providers. No network call is made
+// until the first inference.
 func New(cfg Config) (*Client, error) {
 	c := &Client{providers: map[ProviderID]core.Provider{}, allowed: map[ModelEntry]bool{}}
 	if err := c.init(cfg); err != nil {
@@ -95,6 +104,9 @@ func New(cfg Config) (*Client, error) {
 }
 
 func (c *Client) init(cfg Config) error {
+	if cfg.Timeout < 0 {
+		return errors.New("privateai: Timeout must not be negative")
+	}
 	for id, pc := range cfg.Providers {
 		p, err := newProvider(id, pc, cfg.Timeout)
 		if err != nil {
@@ -103,6 +115,9 @@ func (c *Client) init(cfg Config) error {
 		c.providers[id] = p
 	}
 	for _, m := range cfg.Models {
+		if m.Model == "" {
+			return fmt.Errorf("privateai: a model for %q has no name", m.Provider)
+		}
 		if _, ok := c.providers[m.Provider]; !ok {
 			return fmt.Errorf("privateai: model %s is listed for unconfigured provider %q", m.Model, m.Provider)
 		}

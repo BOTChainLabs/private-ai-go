@@ -22,6 +22,7 @@ import (
 
 	"github.com/BOTChainLabs/private-ai-go/core"
 	"github.com/BOTChainLabs/private-ai-go/internal/canon"
+	"github.com/BOTChainLabs/private-ai-go/internal/tdx"
 )
 
 // fakeGateway is an HTTPS server speaking the ACI endpoints, attesting
@@ -50,6 +51,7 @@ type fakeGateway struct {
 	receiptDigest   string // overrides the digest the receipt names
 	receipt404      atomic.Int32
 	attestations    atomic.Int32
+	chats           atomic.Int32 // chat requests received
 }
 
 // fakeWorkload is the identity the fake gateway attests: placeholder OS
@@ -69,7 +71,7 @@ func dstackEventLog(events [][2]string) (string, []byte) {
 	for _, e := range events {
 		payload, _ := hex.DecodeString(e[1])
 		h := sha512.New384()
-		binary.Write(h, binary.LittleEndian, uint32(dstackEvent))
+		binary.Write(h, binary.LittleEndian, uint32(tdx.DstackEvent))
 		h.Write([]byte(":" + e[0] + ":"))
 		h.Write(payload)
 		digest := h.Sum(nil)
@@ -77,7 +79,7 @@ func dstackEventLog(events [][2]string) (string, []byte) {
 		ext.Write(rtmr)
 		ext.Write(digest)
 		rtmr = ext.Sum(nil)
-		log = append(log, map[string]any{"imr": 3, "event_type": dstackEvent, "digest": hex.EncodeToString(digest), "event": e[0], "event_payload": e[1]})
+		log = append(log, map[string]any{"imr": 3, "event_type": tdx.DstackEvent, "digest": hex.EncodeToString(digest), "event": e[0], "event_payload": e[1]})
 	}
 	b, _ := json.Marshal(log)
 	return string(b), rtmr
@@ -189,6 +191,7 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
+		g.chats.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		var parsed struct {
 			Stream bool `json:"stream"`
@@ -310,6 +313,34 @@ func TestAttestRejectsWrongTLSKey(t *testing.T) {
 	g.rotate(0x07)
 	_, err := g.provider(t).Infer(context.Background(), testReq)
 	assertCode(t, err, core.CodeTLSPinMismatch)
+}
+
+// The gateway's TLS key changes after the preflight: the prompt must not be
+// sent, and the identity must be re-established.
+func TestInferRefusesChangedTLSKey(t *testing.T) {
+	g := newFakeGateway(t)
+	p := g.provider(t)
+	id, err := p.Attest(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := *id
+	stale.KeysetDigest = "sha256:" + strings.Repeat("ab", 32)
+	stale.TLSPins = []string{strings.Repeat("00", 32)}
+	if _, err := p.store(&stale); err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Infer(context.Background(), testReq)
+	assertCode(t, err, core.CodeTLSPinMismatch)
+	if n := g.chats.Load(); n != 0 {
+		t.Fatalf("%d chat requests reached a server with an unpinned key", n)
+	}
+	p.mu.Lock()
+	current := p.current
+	p.mu.Unlock()
+	if current != nil {
+		t.Fatal("identity kept after a TLS key mismatch")
+	}
 }
 
 func TestUndomainedTLSKeyAppliesToAnyHost(t *testing.T) {

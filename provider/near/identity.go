@@ -2,7 +2,9 @@ package near
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -57,12 +59,16 @@ type (
 )
 
 // established is what an identity check proved for one model: the gateway
-// TLS keys and model signing keys that belong to NEAR's apps.
+// TLS keys and model signing keys that belong to NEAR's apps. It is not
+// modified once published; merge returns a new one.
 type established struct {
 	gatewaySPKIs []string
-	signers      []nearai.SigningIdentity
-	modelAppID   string
+	apps         map[string]string // model signer (signerKey) -> its app ID
 	expires      time.Time
+}
+
+func signerKey(s nearai.SigningIdentity) string {
+	return strings.ToLower(string(s.SigningAlgo) + ":" + s.SigningAddress)
 }
 
 // identity proves which code serves a model, beyond NEAR's SDK: the dstack
@@ -79,9 +85,22 @@ type identity struct {
 	workload      Workload
 	now           func() time.Time
 
+	// base bounds identity checks, which outlive the call that started
+	// them; close cancels it.
+	base  context.Context
+	close context.CancelFunc
+
 	once  singleflight.Group
 	mu    sync.Mutex
 	cache map[string]*established
+}
+
+func newIdentity(src attestationSource, verifyGateway verifyGatewayFunc, verifyModel verifyModelFunc, w Workload) *identity {
+	base, cancel := context.WithCancel(context.Background())
+	return &identity{
+		src: src, verifyGateway: verifyGateway, verifyModel: verifyModel, workload: w,
+		now: time.Now, base: base, close: cancel, cache: map[string]*established{},
+	}
 }
 
 func (id *identity) get(ctx context.Context, model string) (*established, error) {
@@ -121,7 +140,7 @@ func (id *identity) covering(ctx context.Context, model string, e *established, 
 // to the cached identity, which keeps its own expiry.
 func (id *identity) refresh(ctx context.Context, model string) (*established, error) {
 	ch := id.once.DoChan(model, func() (any, error) {
-		ictx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		ictx, cancel := context.WithTimeout(id.base, 2*time.Minute)
 		defer cancel()
 		e, err := id.establish(ictx, model)
 		if err != nil {
@@ -149,18 +168,18 @@ func (id *identity) refresh(ctx context.Context, model string) (*established, er
 func (id *identity) establish(ctx context.Context, model string) (*established, error) {
 	noCaller := context.Background()
 	opts := nearai.FetchOptions{SigningAlgo: nearai.Ed25519}
-	e := &established{expires: id.now().Add(identityMaxAge)}
+	e := &established{apps: map[string]string{}, expires: id.now().Add(identityMaxAge)}
 
 	g, err := id.src.FetchGatewayAttestation(ctx, opts)
 	if err != nil {
-		return nil, core.Wrap(noCaller, codeFor(err), err, "fetch gateway attestation")
+		return nil, core.Wrap(noCaller, codeFor(err), detailed(err), "fetch gateway attestation")
 	}
 	if err := precheckOS(g.Attestation, id.workload.OS); err != nil {
 		return nil, core.Errorf(core.CodeAttestationFailed, err, "gateway")
 	}
 	vg, err := id.verifyGateway(ctx, g.Attestation, g.ClientBinding)
 	if err != nil {
-		return nil, core.Wrap(noCaller, codeFor(err), err, "verify gateway attestation")
+		return nil, core.Wrap(noCaller, codeFor(err), detailed(err), "verify gateway attestation")
 	}
 	if _, err := checkApp(g.Attestation, id.workload.OS, id.workload.Gateway); err != nil {
 		return nil, core.Errorf(core.CodeAttestationFailed, err, "gateway is not NEAR's gateway app")
@@ -169,7 +188,7 @@ func (id *identity) establish(ctx context.Context, model string) (*established, 
 
 	m, err := id.src.FetchModelAttestations(ctx, model, opts)
 	if err != nil {
-		return nil, core.Wrap(noCaller, codeFor(err), err, "fetch model attestations")
+		return nil, core.Wrap(noCaller, codeFor(err), detailed(err), "fetch model attestations")
 	}
 	if len(m.Attestations) == 0 {
 		return nil, core.Errorf(core.CodeRouteNotTEE, nil, "model %s has no TEE attestation", model)
@@ -181,14 +200,13 @@ func (id *identity) establish(ctx context.Context, model string) (*established, 
 		}
 		vm, err := id.verifyModel(ctx, a, m.ClientBinding)
 		if err != nil {
-			return nil, core.Wrap(noCaller, codeFor(err), err, "verify model attestation")
+			return nil, core.Wrap(noCaller, codeFor(err), detailed(err), "verify model attestation")
 		}
 		appID, err := checkApp(a, id.workload.OS, id.workload.Model)
 		if err != nil {
 			return nil, core.Errorf(core.CodeAttestationFailed, err, "model %s instance %s is not a NEAR model app", model, a.InstanceID)
 		}
-		e.modelAppID = appID
-		e.signers = append(e.signers, vm.Signer)
+		e.apps[signerKey(vm.Signer)] = appID
 	}
 	return e, nil
 }
@@ -224,32 +242,32 @@ func checkApp(a nearai.Attestation, os []tdx.OSMeasurement, app tdx.App) (string
 
 // merge returns e extended by the keys of fresh, expiring with e.
 func (e *established) merge(fresh *established) *established {
-	m := &established{modelAppID: fresh.modelAppID, expires: e.expires}
+	m := &established{apps: maps.Clone(e.apps), expires: e.expires}
+	maps.Copy(m.apps, fresh.apps)
 	m.gatewaySPKIs = slices.Clone(e.gatewaySPKIs)
 	for _, s := range fresh.gatewaySPKIs {
 		if !slices.Contains(m.gatewaySPKIs, s) {
 			m.gatewaySPKIs = append(m.gatewaySPKIs, s)
 		}
 	}
-	m.signers = slices.Clone(e.signers)
-	for _, s := range fresh.signers {
-		if !m.hasSigner(s) {
-			m.signers = append(m.signers, s)
-		}
-	}
 	return m
 }
 
 func (e *established) hasSigner(s nearai.SigningIdentity) bool {
-	return slices.ContainsFunc(e.signers, func(k nearai.SigningIdentity) bool {
-		return k.SigningAlgo == s.SigningAlgo && strings.EqualFold(k.SigningAddress, s.SigningAddress)
-	})
+	_, ok := e.apps[signerKey(s)]
+	return ok
 }
+
+// appOf returns the app ID of an established model signer.
+func (e *established) appOf(s nearai.SigningIdentity) string { return e.apps[signerKey(s)] }
 
 // checkSession requires the SDK's session for model, the one its next
 // request is encrypted under, to use only identity-checked keys.
 func (e *established) checkSession(r nearai.AttestationVerificationResult) error {
-	if r.Gateway != nil && !slices.Contains(e.gatewaySPKIs, strings.ToLower(r.Gateway.SPKIFingerprint)) {
+	if r.Gateway == nil {
+		return errors.New("session has no attested gateway")
+	}
+	if !slices.Contains(e.gatewaySPKIs, strings.ToLower(r.Gateway.SPKIFingerprint)) {
 		return fmt.Errorf("gateway TLS key %s was not established as NEAR's gateway", r.Gateway.SPKIFingerprint)
 	}
 	if len(r.Models) == 0 {

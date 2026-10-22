@@ -3,266 +3,616 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Private AI Demo</title>
+<title>Private AI · Verified confidential inference</title>
 <style>
   :root {
-    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #6b7280; --line: #e3e6eb;
-    --accent: #2f6fed; --ok: #16794c; --ok-bg: #e6f5ec; --warn: #9a6700; --warn-bg: #fff4d6;
-    --bad: #b42318; --bad-bg: #fde8e7; --user: #2f6fed; --user-text: #ffffff; --code: #f1f3f6;
+    --bg: #f5f6f8; --surface: #ffffff; --surface-2: #f1f3f6; --text: #111827; --muted: #6b7280;
+    --line: #e5e7eb; --line-strong: #cfd4dc; --accent: #4f46e5; --accent-soft: #eef2ff;
+    --ok: #047857; --ok-soft: #e7f7ef; --warn: #b45309; --warn-soft: #fff6e0; --bad: #b91c1c; --bad-soft: #fdecec;
+    --phala: #0f766e; --near: #1f2937; --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .08);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0f1218; --panel: #171b23; --text: #e6e8ec; --muted: #9aa3b2; --line: #2a303b;
-      --accent: #6b9bff; --ok: #4ccb8a; --ok-bg: #12301f; --warn: #f0c050; --warn-bg: #3a2f10;
-      --bad: #ff7b72; --bad-bg: #3d1716; --user: #3b6fe0; --user-text: #ffffff; --code: #1f2430;
+      --bg: #0b0d12; --surface: #12151c; --surface-2: #191d26; --text: #e6e8ec; --muted: #9aa3b2;
+      --line: #252a35; --line-strong: #3a4150; --accent: #8b93ff; --accent-soft: #1d1f3d;
+      --ok: #3ccf91; --ok-soft: #0d2a1e; --warn: #f2bd4b; --warn-soft: #33270b; --bad: #ff7b72; --bad-soft: #3a1414;
+      --phala: #14b8a6; --near: #4b5563; --shadow: none;
     }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
-  .app { max-width: 880px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column; padding: 0 16px; }
-  header { padding: 22px 0 14px; border-bottom: 1px solid var(--line); }
-  h1 { margin: 0; font-size: 20px; font-weight: 650; }
-  header p { margin: 4px 0 0; color: var(--muted); font-size: 13.5px; }
-  .toolbar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
-  select, button, textarea { font: inherit; color: inherit; }
-  select { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
-  label.toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); cursor: pointer; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14.5px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, "PingFang SC", "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
+  button, textarea { font: inherit; color: inherit; }
+  svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+  /* Top bar */
+  .top { height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
+  .logo { width: 30px; height: 30px; border-radius: 8px; background: var(--accent); color: #fff; display: grid; place-items: center; }
+  .logo svg { width: 18px; height: 18px; }
+  .brand { font-weight: 650; font-size: 15.5px; letter-spacing: -.01em; }
+  .tag { font-size: 11.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
   .spacer { flex: 1; }
-  .ghost { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; color: var(--muted); }
-  #log { flex: 1; padding: 18px 0; display: flex; flex-direction: column; gap: 14px; }
-  .empty { color: var(--muted); text-align: center; margin: 48px 0; font-size: 14px; }
-  .msg { max-width: 92%; }
-  .msg.user { align-self: flex-end; background: var(--user); color: var(--user-text); padding: 9px 13px; border-radius: 14px 14px 4px 14px; white-space: pre-wrap; }
-  .msg.bot { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); border-radius: 14px 14px 14px 4px; overflow: hidden; }
-  .msg.bot .text { padding: 10px 14px; white-space: pre-wrap; min-height: 1.5em; }
-  .msg.bot.pending .text { color: var(--muted); }
-  .bar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 8px 14px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
-  .badge { font-weight: 600; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
-  .badge.ok { color: var(--ok); background: var(--ok-bg); }
-  .badge.warn { color: var(--warn); background: var(--warn-bg); }
-  .badge.bad { color: var(--bad); background: var(--bad-bg); }
-  .bar button { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-size: 12.5px; }
-  .details { display: none; padding: 4px 14px 12px; font-size: 12.5px; }
-  .details.open { display: block; }
-  .details table { border-collapse: collapse; width: 100%; }
-  .details td { padding: 3px 0; vertical-align: top; }
-  .details td:first-child { color: var(--muted); width: 128px; padding-right: 10px; }
-  .details code { background: var(--code); padding: 1px 5px; border-radius: 4px; word-break: break-all; font-size: 11.5px; }
-  .error { color: var(--bad); padding: 10px 14px; font-size: 13.5px; }
-  .error small { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; word-break: break-word; }
-  .composer { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0 18px; display: flex; gap: 10px; border-top: 1px solid var(--line); }
-  textarea { flex: 1; resize: none; height: 46px; max-height: 160px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; }
-  textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  .send { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 0 18px; font-weight: 600; cursor: pointer; }
-  .send:disabled { opacity: .5; cursor: default; }
-  .note { color: var(--muted); font-size: 12.5px; }
+  .top a { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); text-decoration: none; font-size: 13px; }
+  .top a:hover { color: var(--text); }
+  .brand, .tag, .top a, .btn { white-space: nowrap; }
+
+  /* Layout */
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 400px; height: calc(100% - 56px); }
+  .chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 24px; background: var(--surface); border-bottom: 1px solid var(--line); }
+  .seg { display: inline-flex; gap: 3px; padding: 3px; background: var(--surface-2); border-radius: 11px; }
+  .seg button { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 5px 12px; border: 0; border-radius: 8px; background: none; cursor: pointer; line-height: 1.25; color: var(--muted); }
+  .seg button b { font-size: 13px; font-weight: 600; color: var(--text); }
+  .seg button span { font-size: 11.5px; }
+  .seg button.on { background: var(--surface); box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+  .seg button:disabled { cursor: default; }
+  .switch { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); cursor: pointer; user-select: none; }
+  .switch input { position: absolute; opacity: 0; pointer-events: none; }
+  .track { width: 32px; height: 18px; border-radius: 999px; background: var(--line-strong); position: relative; transition: background .15s; }
+  .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::after { transform: translateX(14px); }
+  .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .note { font-size: 12px; color: var(--muted); }
+  .btn { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font-size: 13px; font-weight: 600; cursor: pointer; }
+  .btn:hover:not(:disabled) { border-color: var(--line-strong); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* Conversation */
+  #log { flex: 1; min-height: 0; overflow-y: auto; padding: 28px 24px; }
+  .thread { max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+  .welcome { text-align: center; padding: 28px 0 8px; }
+  .welcome .logo { width: 48px; height: 48px; border-radius: 14px; margin: 0 auto 16px; }
+  .welcome .logo svg { width: 26px; height: 26px; }
+  .welcome h1 { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -.02em; }
+  .welcome > p { max-width: 560px; margin: 10px auto 0; color: var(--muted); }
+  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 26px 0 0; text-align: left; }
+  .features div { padding: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+  .features svg { width: 20px; height: 20px; color: var(--accent); }
+  .features b { display: block; margin-top: 8px; font-size: 13.5px; }
+  .features span { display: block; margin-top: 2px; font-size: 12.5px; color: var(--muted); }
+  .suggest { display: flex; flex-direction: column; gap: 8px; margin-top: 22px; }
+  .suggest button { text-align: left; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); cursor: pointer; font-size: 13.5px; }
+  .suggest button:hover { border-color: var(--accent); }
+  .user { align-self: flex-end; max-width: 78%; padding: 10px 14px; border-radius: 16px 16px 4px 16px; background: var(--accent); color: #fff; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .answer { display: flex; gap: 12px; align-items: flex-start; }
+  .avatar { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-size: 12.5px; font-weight: 700; }
+  .avatar.phala { background: var(--phala); }
+  .avatar.near { background: var(--near); }
+  .card { flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 4px 16px 16px 16px; box-shadow: var(--shadow); transition: border-color .15s, box-shadow .15s; }
+  .card.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .who { padding: 10px 16px 0; font-size: 12px; color: var(--muted); }
+  .body { padding: 4px 16px 12px; overflow-wrap: anywhere; }
+  .body:empty { display: none; }
+  .body p { margin: .45em 0; }
+  .body h4 { margin: .8em 0 .3em; font-size: 14.5px; }
+  .body ul, .body ol { margin: .4em 0; padding-left: 1.4em; }
+  .body code { font-family: var(--mono); font-size: .9em; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+  .body pre { background: var(--surface-2); padding: 10px 12px; border-radius: 8px; overflow-x: auto; }
+  .body pre code { background: none; padding: 0; }
+  .card.refused .body { opacity: .5; }
+  .refusal { margin: 0 16px 12px; padding: 10px 12px; border-radius: 10px; background: var(--bad-soft); color: var(--bad); font-size: 13px; }
+  .refusal.off { background: var(--surface-2); color: var(--muted); }
+  .refusal b { font-weight: 600; }
+  .foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 9px 16px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .chip svg { width: 13px; height: 13px; stroke-width: 2.4; }
+  .chip.ok { color: var(--ok); background: var(--ok-soft); }
+  .chip.wait { color: var(--warn); background: var(--warn-soft); }
+  .chip.bad { color: var(--bad); background: var(--bad-soft); }
+  .chip.off { color: var(--muted); background: var(--surface-2); }
+  .link { margin-left: auto; padding: 0; border: 0; background: none; color: var(--accent); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+  .typing { display: inline-flex; gap: 4px; padding: 8px 0 2px; }
+  .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--line-strong); animation: blink 1.2s infinite; }
+  .typing i:nth-child(2) { animation-delay: .2s; }
+  .typing i:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .3; } 40% { opacity: 1; } }
+  .spin { width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Composer */
+  .composer { padding: 14px 24px 16px; background: var(--surface); border-top: 1px solid var(--line); }
+  .box { max-width: 780px; margin: 0 auto; display: flex; align-items: flex-end; gap: 10px; padding: 7px 7px 7px 14px; background: var(--bg); border: 1px solid var(--line); border-radius: 14px; }
+  .box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  textarea { flex: 1; min-height: 24px; max-height: 180px; padding: 6px 0; border: 0; outline: 0; resize: none; background: none; }
+  .send { width: 38px; height: 38px; display: grid; place-items: center; border: 0; border-radius: 10px; background: var(--accent); color: #fff; cursor: pointer; }
+  .send:disabled { opacity: .45; cursor: default; }
+  .send svg { width: 18px; height: 18px; }
+  .hint { max-width: 780px; margin: 7px auto 0; font-size: 12px; color: var(--muted); }
+
+  /* Proof panel */
+  .proof { display: flex; flex-direction: column; min-height: 0; background: var(--surface); border-left: 1px solid var(--line); }
+  .proof-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px 0; }
+  .proof-head h2 { margin: 0; font-size: 15px; }
+  .proof-head span { font-size: 12px; color: var(--muted); }
+  .proof-head .close { display: none; margin-left: auto; border: 0; background: none; color: var(--muted); cursor: pointer; padding: 4px; }
+  #proofBody { flex: 1; overflow-y: auto; padding: 14px 20px 20px; }
+  .status { display: flex; gap: 12px; align-items: flex-start; padding: 14px; border-radius: 12px; background: var(--surface-2); }
+  .status .icon { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--surface); color: var(--muted); flex: none; }
+  .status .icon svg { width: 19px; height: 19px; }
+  .status b { display: block; font-size: 15.5px; }
+  .status p { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
+  .status.ok { background: var(--ok-soft); } .status.ok .icon, .status.ok b { color: var(--ok); }
+  .status.wait { background: var(--warn-soft); } .status.wait .icon, .status.wait b { color: var(--warn); }
+  .status.bad { background: var(--bad-soft); } .status.bad .icon, .status.bad b { color: var(--bad); }
+  .section { margin: 18px 0 6px; font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .checks { list-style: none; margin: 0; padding: 0; }
+  .checks li { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .checks li:last-child { border-bottom: 0; }
+  .mark { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; flex: none; margin-top: 1px; }
+  .mark svg { width: 13px; height: 13px; stroke-width: 2.6; }
+  .done .mark { background: var(--ok-soft); color: var(--ok); }
+  .done { animation: rise .35s ease both; animation-delay: calc(var(--i) * 90ms); }
+  @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+  .pending .mark { color: var(--warn); }
+  .todo .mark { border: 1.5px dashed var(--line-strong); }
+  .checks b { display: block; font-size: 13.5px; font-weight: 600; }
+  .checks p { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+  .todo b, .pending b { color: var(--muted); font-weight: 500; }
+  details.evidence { margin-top: 16px; border: 1px solid var(--line); border-radius: 12px; }
+  details.evidence summary { display: flex; justify-content: space-between; padding: 10px 14px; font-size: 13px; font-weight: 600; cursor: pointer; list-style: none; }
+  details.evidence summary::-webkit-details-marker { display: none; }
+  details.evidence summary::after { content: "Show"; color: var(--accent); font-size: 12.5px; }
+  details.evidence[open] summary::after { content: "Hide"; }
+  dl { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 7px 10px; margin: 0; padding: 2px 14px 14px; font-size: 12.5px; }
+  dt { color: var(--muted); }
+  dd { display: flex; gap: 6px; align-items: flex-start; margin: 0; min-width: 0; }
+  dd code { flex: 1; min-width: 0; font: 11.5px/1.5 var(--mono); word-break: break-all; }
+  .copy { padding: 0 2px; border: 0; background: none; color: var(--muted); cursor: pointer; }
+  .copy:hover { color: var(--accent); }
+  .copy svg { width: 13px; height: 13px; }
+  .actions { display: flex; gap: 8px; margin-top: 16px; }
+  .tech { padding: 10px 12px; border-radius: 10px; background: var(--surface-2); font: 11.5px/1.6 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+  .proof footer { padding: 12px 20px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .proof footer a { color: var(--accent); text-decoration: none; }
+
+  @media (max-width: 1000px) {
+    .layout { grid-template-columns: 1fr; }
+    .proof { position: fixed; top: 56px; right: 0; bottom: 0; width: min(420px, 100%); z-index: 10; transform: translateX(100%); transition: transform .2s ease; box-shadow: -8px 0 24px rgba(0,0,0,.12); }
+    .proof.open { transform: none; }
+    .proof-head .close { display: inline-flex; }
+    .features { grid-template-columns: 1fr; }
+    #log, .toolbar, .composer { padding-left: 16px; padding-right: 16px; }
+  }
+  @media (max-width: 640px) {
+    .tag, .wide, #streamNote { display: none; }
+    .top { padding: 0 16px; }
+    .toolbar { flex-wrap: nowrap; gap: 10px; }
+    .seg button { padding: 7px 12px; }
+    .seg button span { display: none; }
+    .user { max-width: 88%; }
+  }
 </style>
 </head>
 <body>
-<div class="app">
-  <header>
-    <h1>Private AI Demo</h1>
-    <p>Every answer is checked before it counts: the TEE hardware, the code it runs, and a signature over the exact bytes.</p>
-  </header>
+<header class="top">
+  <div class="logo"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg></div>
+  <span class="brand">Private AI</span>
+  <span class="tag">SDK demo</span>
+  <span class="spacer"></span>
+  <a href="https://github.com/BOTChainLabs/private-ai-go" target="_blank" rel="noopener" aria-label="Open-source SDK"><svg viewBox="0 0 24 24"><path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/></svg><span class="wide">Open-source SDK</span></a>
+</header>
 
-  <div class="toolbar">
-    <select id="model" aria-label="Model"></select>
-    <label class="toggle"><input type="checkbox" id="stream" checked> Stream</label>
-    <span class="note" id="streamNote"></span>
-    <span class="spacer"></span>
-    <button class="ghost" id="clear">Clear</button>
-  </div>
+<main class="layout">
+  <section class="chat">
+    <div class="toolbar">
+      <div class="seg" id="models" role="radiogroup" aria-label="Provider and model"></div>
+      <label class="switch"><input type="checkbox" id="stream" checked><span class="track"></span>Stream</label>
+      <span class="note" id="streamNote"></span>
+      <span class="spacer"></span>
+      <button class="btn" id="reset" type="button" aria-label="New chat"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span class="wide">New chat</span></button>
+    </div>
 
-  <div id="log"><div class="empty">Ask anything. Each answer shows how it was verified.</div></div>
+    <div id="log"><div class="thread" id="thread"></div></div>
 
-  <div class="composer">
-    <textarea id="input" placeholder="Type a message. Enter to send, Shift+Enter for a new line"></textarea>
-    <button class="send" id="send">Send</button>
-  </div>
-</div>
+    <form class="composer" id="composer">
+      <div class="box">
+        <textarea id="input" rows="1" placeholder="Ask anything…" aria-label="Message"></textarea>
+        <button class="send" id="send" type="submit" aria-label="Send"></button>
+      </div>
+      <div class="hint">Enter to send · Shift+Enter for a new line · API keys stay on the demo server</div>
+    </form>
+  </section>
+
+  <aside class="proof" id="proof" aria-label="Proof">
+    <div class="proof-head">
+      <h2>Proof</h2><span id="proofFor"></span>
+      <button class="close" id="closeProof" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div id="proofBody"></div>
+    <footer>Built with the open-source <a href="https://github.com/BOTChainLabs/private-ai-go" target="_blank" rel="noopener">Private AI SDK for Go</a></footer>
+  </aside>
+</main>
+
+<template id="welcomeTpl">
+  <section class="welcome" id="welcome">
+    <div class="logo"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg></div>
+    <h1>Private AI you can verify</h1>
+    <p>Prompts are processed only inside hardware-isolated enclaves (TEEs). Every answer comes with a proof, and it is accepted only after this page's server has checked that proof.</p>
+    <div class="features">
+      <div><svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 3v2M14 3v2M10 19v2M14 19v2M3 10h2M3 14h2M19 10h2M19 14h2"/></svg><b>Runs in a TEE</b><span>Intel TDX hardware, plus NVIDIA confidential GPUs on NEAR AI.</span></div>
+      <div><svg viewBox="0 0 24 24"><path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/></svg><b>Approved code only</b><span>The OS build and app are pinned to the provider's release.</span></div>
+      <div><svg viewBox="0 0 24 24"><path d="M4 20h16"/><path d="M14.5 4.5l5 5L9 20H4v-5z"/></svg><b>Signed answers</b><span>Signed inside the TEE, so the answer cannot be altered on the way.</span></div>
+    </div>
+    <div class="suggest" id="suggest">
+      <button type="button">Explain in two sentences why a TEE keeps this conversation private.</button>
+      <button type="button">Draft a short, confidential note to a client about a delayed delivery.</button>
+      <button type="button">List three risks of sending customer data to a public AI API.</button>
+    </div>
+  </section>
+</template>
 
 <script>
-const $ = (id) => document.getElementById(id);
-const turns = [];
-let busy = false;
+"use strict";
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const svg = (d) => `<svg viewBox="0 0 24 24">${d}</svg>`;
+const ICON = {
+  shield: svg('<path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z"/>'),
+  shieldOk: svg('<path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/>'),
+  shieldX: svg('<path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z"/><path d="M10 10l4 4M14 10l-4 4"/>'),
+  check: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
+  x: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
+  send: svg('<path d="M5 12h14M13 6l6 6-6 6"/>'),
+  stop: svg('<rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/>'),
+  copy: svg('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>'),
+  download: svg('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>'),
+};
+const SPIN = '<span class="spin"></span>';
+const TYPING = '<span class="typing"><i></i><i></i><i></i></span>';
+const FINAL = ["verified", "failed", "stopped"];
+const BUSY = ["waiting", "generating", "streaming"];
 
-async function loadModels() {
-  const res = await fetch("/api/models");
-  const models = await res.json();
-  for (const m of models) {
-    const opt = el("option", null, `${m.provider === "near" ? "NEAR AI" : "Phala"} · ${m.model}`);
-    opt.value = `${m.provider}|${m.model}`;
-    $("model").append(opt);
+const state = { models: [], model: null, turns: [], answers: [], selected: null, busy: false, ctrl: null, seq: 0 };
+
+// --- Answer text: a small, escape-first Markdown subset -------------------
+function inline(s) {
+  return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+}
+function blocks(text) {
+  const html = [];
+  let para = [], list = null;
+  const endPara = () => { if (para.length) html.push(`<p>${para.map(inline).join("<br>")}</p>`); para = []; };
+  const endList = () => { if (list) html.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join("")}</${list.tag}>`); list = null; };
+  for (const line of text.split("\n")) {
+    let m;
+    if (!line.trim()) { endPara(); endList(); }
+    else if ((m = line.match(/^#{1,4}\s+(.*)$/))) { endPara(); endList(); html.push(`<h4>${inline(m[1])}</h4>`); }
+    else if ((m = line.match(/^\s*(?:[-*•]|(\d+)[.)])\s+(.*)$/))) {
+      const tag = m[1] ? "ol" : "ul";
+      endPara();
+      if (!list || list.tag !== tag) { endList(); list = { tag, items: [] }; }
+      list.items.push(m[2]);
+    } else { endList(); para.push(line); }
   }
-  updateNote();
+  endPara(); endList();
+  return html.join("");
+}
+function markdown(src) {
+  return src.split("```").map((part, i) => i % 2
+    ? `<pre><code>${esc(part.replace(/^[^\n]*\n/, ""))}</code></pre>`
+    : blocks(part)).join("");
 }
 
-function selected() {
-  const [provider, model] = $("model").value.split("|");
-  return { provider, model };
+// --- Models ----------------------------------------------------------------
+async function loadModels() {
+  try {
+    const res = await fetch("api/models");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.models = await res.json();
+  } catch (e) {
+    $("#thread").innerHTML = `<div class="refusal"><b>Could not load the models.</b> ${esc(e.message)}</div>`;
+    return;
+  }
+  $("#models").replaceChildren(...state.models.map((m, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.innerHTML = `<b>${esc(m.label)}</b><span>${esc(m.model)}</span>`;
+    b.onclick = () => pickModel(i);
+    return b;
+  }));
+  pickModel(0);
+}
+
+function pickModel(i) {
+  if (state.busy || !state.models[i]) return;
+  state.model = state.models[i];
+  [...$("#models").children].forEach((b, j) => { b.classList.toggle("on", j === i); b.setAttribute("aria-checked", String(j === i)); });
+  updateNote();
+  if (!state.selected) renderProof();
 }
 
 function updateNote() {
-  const near = selected().provider === "near";
-  $("streamNote").textContent = near && $("stream").checked ? "NEAR returns the verified answer in one piece" : "";
+  const m = state.model;
+  $("#streamNote").textContent = m && !m.streams && $("#stream").checked ? `${m.label} sends the answer in one piece, after verification` : "";
 }
 
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text != null) e.textContent = text;
-  return e;
+// --- Conversation ------------------------------------------------------------
+function showWelcome() {
+  $("#thread").replaceChildren($("#welcomeTpl").content.cloneNode(true));
+  for (const b of $("#suggest").children) b.onclick = () => send(b.textContent);
 }
 
 function addUser(text) {
-  const empty = $("log").querySelector(".empty");
-  if (empty) empty.remove();
-  $("log").append(el("div", "msg user", text));
+  const el = document.createElement("div");
+  el.className = "user";
+  el.textContent = text;
+  $("#thread").append(el);
 }
 
-function addBot() {
-  const box = el("div", "msg bot pending");
-  const text = el("div", "text");
-  const bar = el("div", "bar");
-  const badge = el("span", "badge warn", "Waiting for the TEE…");
-  bar.append(badge);
-  box.append(text, bar);
-  $("log").append(box);
-  scroll();
-  return { box, text, bar, badge };
+function addAnswer(m, question) {
+  const a = { id: ++state.seq, provider: m.provider, label: m.label, model: m.model, checks: m.checks, question,
+    state: "waiting", text: "", data: null, error: null, at: new Date() };
+  a.el = document.createElement("article");
+  a.el.className = "answer";
+  a.el.innerHTML = `<div class="avatar ${esc(m.provider)}">${esc(m.label.charAt(0))}</div>
+    <div class="card"><div class="who">${esc(m.label)} · ${esc(m.model)}</div><div class="body"></div>
+    <div class="foot"><span class="chip"></span><span class="meta"></span><button class="link" type="button">View proof</button></div></div>`;
+  a.el.querySelector(".link").onclick = () => select(a.id, true);
+  $("#thread").append(a.el);
+  state.answers.push(a);
+  select(a.id);
+  update(a);
+  return a;
 }
 
-function scroll() { window.scrollTo({ top: document.body.scrollHeight }); }
-
-function short(h) { return h && h.length > 20 ? h.slice(0, 12) + "…" + h.slice(-6) : (h || ""); }
-
-function showVerified(view, data) {
-  const v = data.verification;
-  view.box.classList.remove("pending");
-  view.badge.className = "badge ok";
-  view.badge.textContent = "Verified ✓";
-  const provider = v.provider === "near" ? "NEAR AI" : "Phala";
-  const secs = (data.elapsed_ms / 1000).toFixed(1) + " s";
-  const tokens = data.usage && data.usage.total_tokens ? ` · ${data.usage.total_tokens} tokens` : "";
-  view.bar.append(el("span", null, `${provider} · TCB ${v.tcb_status || "?"} · ${secs}${tokens}`));
-  addDetails(view, v);
+function select(id, open) {
+  state.selected = id;
+  for (const a of state.answers) a.el.querySelector(".card").classList.toggle("selected", a.id === id);
+  renderProof();
+  if (open) $("#proof").classList.add("open");
 }
 
-function addDetails(view, v) {
-  if (!v) return;
-  const toggle = el("button", null, "Details");
-  const details = el("div", "details");
-  const rows = [
-    ["Status", v.status], ["Route", v.route], ["Model", v.model], ["TCB status", v.tcb_status],
-    ["App ID", v.app_id], ["Compose hash", v.compose_hash], ["OS image", v.os_image_hash],
-    ["Keyset", v.keyset_digest], ["Receipt", v.receipt_id], ["Upstream session", v.session_id],
-    ["Signed evidence", v.receipt_bytes ? v.receipt_bytes + " bytes" : ""],
-    ["Reasons", (v.reasons || []).join("; ")],
-  ].filter(([, val]) => val);
-  const table = el("table");
-  for (const [k, val] of rows) {
-    const tr = el("tr");
-    const code = el("code", null, String(val));
-    const td = el("td");
-    td.append(code);
-    tr.append(el("td", null, k), td);
-    table.append(tr);
+function secs(ms) { return (ms / 1000).toFixed(1) + " s"; }
+
+function update(a) {
+  const s = a.state;
+  const chip = a.el.querySelector(".chip");
+  chip.className = "chip " + (BUSY.includes(s) ? "wait" : { verified: "ok", failed: "bad", stopped: "off" }[s]);
+  chip.innerHTML = {
+    waiting: `${SPIN}Verifying…`,
+    generating: `${SPIN}Generating · not verified yet`,
+    streaming: `${SPIN}Streaming · not verified yet`,
+    verified: `${ICON.check}Verified`,
+    failed: `${ICON.x}Not verified`,
+    stopped: "Stopped",
+  }[s];
+  const meta = [];
+  if (s === "verified") {
+    meta.push(secs(a.data.elapsed_ms));
+    if (a.data.usage && a.data.usage.total_tokens) meta.push(`${a.data.usage.total_tokens} tokens`);
   }
-  details.append(table);
-  toggle.onclick = () => { details.classList.toggle("open"); toggle.textContent = details.classList.contains("open") ? "Hide" : "Details"; };
-  view.bar.append(toggle);
-  view.box.append(details);
+  if (s === "failed" && a.error.code) meta.push(a.error.code);
+  a.el.querySelector(".meta").textContent = meta.join(" · ");
+  a.el.querySelector(".card").classList.toggle("refused", s === "failed" || s === "stopped");
+  if ((s === "failed" || s === "stopped") && !a.el.querySelector(".refusal")) {
+    const box = document.createElement("div");
+    box.className = "refusal" + (s === "stopped" ? " off" : "");
+    const why = s === "stopped" ? "Stopped before it was verified." : a.error.reason || "The request failed.";
+    box.innerHTML = `<b>${esc(why)}</b>${a.text ? " The text above was never verified and is discarded." : ""}`;
+    a.el.querySelector(".foot").before(box);
+  }
+  renderText(a);
+  if (a.id === state.selected) renderProof();
 }
 
-// Why an answer was refused, in plain words; the SDK's message follows.
-const reasons = {
-  INVALID_REQUEST: "The request was invalid, so nothing was sent.",
-  MODEL_NOT_ALLOWED: "This model is not enabled, so nothing was sent.",
-  ATTESTATION_FAILED: "The TEE or the code it runs did not check out, so the answer was refused.",
-  TLS_PIN_MISMATCH: "The server's TLS key is not the attested one, so nothing was sent.",
-  RECEIPT_INVALID: "The signature over the answer did not check out, so the answer was refused.",
-  ROUTE_NOT_TEE: "The request was not served inside a TEE, so the answer was refused.",
-  EVIDENCE_UNAVAILABLE: "The proof could not be fetched, so the answer was refused.",
-  VERIFIER_UNAVAILABLE: "An attestation service (Intel, or NVIDIA for NEAR's GPUs) could not be reached, so the answer was refused.",
-  PROVIDER_ERROR: "The provider returned an error, such as a bad key, low balance or rate limit.",
-  NETWORK: "The connection to this demo server was lost.",
-};
-
-function showError(view, err) {
-  view.box.classList.remove("pending");
-  view.badge.className = "badge bad";
-  view.badge.textContent = "Not verified ✗";
-  view.bar.append(el("span", null, err.code || "ERROR"));
-  if (!view.text.textContent) view.text.remove();
-  const box = el("div", "error", reasons[err.code] || "The request failed.");
-  box.append(el("small", null, err.message || ""));
-  view.box.insertBefore(box, view.bar);
-  addDetails(view, err.verification);
+function renderText(a) {
+  if (a.frame) return;
+  a.frame = requestAnimationFrame(() => {
+    a.frame = 0;
+    a.el.querySelector(".body").innerHTML = a.text ? markdown(a.text) : BUSY.includes(a.state) ? TYPING : "";
+    scrollDown();
+  });
 }
 
-async function send() {
-  const content = $("input").value.trim();
-  if (!content || busy) return;
-  busy = true;
-  $("send").disabled = true;
-  $("input").value = "";
-  addUser(content);
-  turns.push({ role: "user", content });
-  const view = addBot();
-  const { provider, model } = selected();
-  const stream = $("stream").checked;
+function scrollDown(force) {
+  const log = $("#log");
+  if (force || log.scrollHeight - log.scrollTop - log.clientHeight < 160) log.scrollTop = log.scrollHeight;
+}
+
+function settle(a, s, fields) {
+  if (FINAL.includes(a.state)) return;
+  Object.assign(a, fields, { state: s });
+  if (s === "verified") state.turns.push({ role: "assistant", content: a.text });
+  else if (state.turns.length && state.turns[state.turns.length - 1].role === "user") state.turns.pop();
+  update(a);
+}
+
+async function readEvents(res, on) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buf += decoder.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      let event = "message", data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event: ")) event = line.slice(7);
+        else if (line.startsWith("data: ")) data += line.slice(6);
+      }
+      if (data) on(event, JSON.parse(data));
+    }
+  }
+}
+
+async function send(text) {
+  text = text.trim();
+  if (!text || state.busy || !state.model) return;
+  if ($("#welcome")) $("#thread").replaceChildren();
+  addUser(text);
+  state.turns.push({ role: "user", content: text });
+  const a = addAnswer(state.model, text);
+  scrollDown(true);
+  setBusy(true);
+  state.ctrl = new AbortController();
   try {
-    const res = await fetch("/api/chat", {
+    const res = await fetch("api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider, model, messages: turns, stream }),
+      body: JSON.stringify({ provider: a.provider, model: a.model, messages: state.turns, stream: $("#stream").checked }),
+      signal: state.ctrl.signal,
     });
-    const isSSE = (res.headers.get("Content-Type") || "").startsWith("text/event-stream");
-    if (!isSSE) {
+    if (!(res.headers.get("Content-Type") || "").startsWith("text/event-stream")) {
       const data = await res.json();
-      if (!res.ok) { showError(view, data.error || {}); turns.pop(); return; }
-      view.text.textContent = data.content;
-      turns.push({ role: "assistant", content: data.content });
-      showVerified(view, data);
+      if (res.ok) settle(a, "verified", { text: data.content, data });
+      else settle(a, "failed", { error: data.error || {} });
       return;
     }
-    view.badge.textContent = "Streaming · not verified yet";
-    let answer = "", settled = false;
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let i;
-      while ((i = buf.indexOf("\n\n")) >= 0) {
-        const block = buf.slice(0, i);
-        buf = buf.slice(i + 2);
-        const event = (block.match(/^event: (.*)$/m) || [])[1];
-        const data = JSON.parse((block.match(/^data: (.*)$/m) || [])[1] || "{}");
-        if (event === "delta") { answer += data.content; view.text.textContent = answer; scroll(); }
-        if (event === "verified") { settled = true; turns.push({ role: "assistant", content: answer }); showVerified(view, data); }
-        if (event === "error") { settled = true; showError(view, data.error || {}); turns.pop(); }
-      }
-    }
-    if (!settled) { showError(view, { code: "NETWORK", message: "The stream ended before verification" }); turns.pop(); }
+    await readEvents(res, (event, data) => {
+      if (event === "started" && a.state === "waiting") { a.state = "generating"; update(a); }
+      else if (event === "delta" && !FINAL.includes(a.state)) {
+        a.text += data.content;
+        if (a.state !== "streaming") { a.state = "streaming"; update(a); } else renderText(a);
+      } else if (event === "verified") settle(a, "verified", { data });
+      else if (event === "error") settle(a, "failed", { error: data.error || {} });
+    });
+    settle(a, "failed", { error: { code: "NETWORK", reason: "The connection closed before the answer was verified." } });
   } catch (e) {
-    showError(view, { code: "NETWORK", message: e.message });
-    turns.pop();
+    if (e.name === "AbortError") settle(a, "stopped", {});
+    else settle(a, "failed", { error: { code: "NETWORK", reason: "Could not reach the demo server.", message: e.message } });
   } finally {
-    busy = false;
-    $("send").disabled = false;
-    $("input").focus();
-    scroll();
+    state.ctrl = null;
+    setBusy(false);
   }
 }
 
-$("send").onclick = send;
-$("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
-$("model").onchange = updateNote;
-$("stream").onchange = updateNote;
-$("clear").onclick = () => { if (busy) return; turns.length = 0; $("log").innerHTML = '<div class="empty">Ask anything. Each answer shows how it was verified.</div>'; };
+function setBusy(busy) {
+  state.busy = busy;
+  const b = $("#send");
+  b.innerHTML = busy ? ICON.stop : ICON.send;
+  b.setAttribute("aria-label", busy ? "Stop" : "Send");
+  $("#reset").disabled = busy;
+  for (const m of $("#models").children) m.disabled = busy;
+  if (!busy) $("#input").focus();
+}
+
+function reset() {
+  if (state.busy) return;
+  state.turns = [];
+  state.answers = [];
+  state.selected = null;
+  showWelcome();
+  renderProof();
+}
+
+// --- Proof panel -------------------------------------------------------------
+function statusBlock(cls, icon, title, text) {
+  return `<div class="status ${cls}"><div class="icon">${icon}</div><div><b>${esc(title)}</b><p>${esc(text)}</p></div></div>`;
+}
+
+function checkList(items, cls) {
+  return `<div class="section">Checks</div><ol class="checks">${items.map((c, i) => {
+    const mark = cls === "done" ? ICON.check : cls === "pending" ? SPIN : "";
+    const detail = c.detail ? `<p>${esc(c.detail)}</p>` : "";
+    return `<li class="${cls}" style="--i:${i}"><span class="mark">${mark}</span><div><b>${esc(c.title)}</b>${detail}</div></li>`;
+  }).join("")}</ol>`;
+}
+
+const EVIDENCE = [
+  ["tcb_status", "TCB status"], ["app_id", "App ID"], ["compose_hash", "Compose hash"], ["os_image_hash", "OS image"],
+  ["keyset_digest", "Keyset"], ["receipt_id", "Receipt"], ["session_id", "Upstream session"],
+];
+
+function evidenceTable(a) {
+  const v = a.data.verification, e = v.evidence || {};
+  const rows = [["Provider", a.label], ["Model", v.model], ["Route", v.route], ...EVIDENCE.map(([k, label]) => [label, e[k]])].filter(([, val]) => val);
+  return `<details class="evidence"><summary>Evidence</summary><dl>${rows.map(([k, val]) =>
+    `<dt>${esc(k)}</dt><dd><code>${esc(val)}</code><button class="copy" type="button" data-v="${esc(val)}" title="Copy" aria-label="Copy ${esc(k)}">${ICON.copy}</button></dd>`).join("")}</dl></details>`;
+}
+
+function renderProof() {
+  const body = $("#proofBody");
+  const a = state.answers.find((x) => x.id === state.selected);
+  if (!a) {
+    const m = state.model;
+    $("#proofFor").textContent = "";
+    body.innerHTML = m
+      ? statusBlock("", ICON.shield, "No answer yet", `Each answer from ${m.label} is accepted only after these checks pass.`) + checkList(m.checks.map((title) => ({ title })), "todo")
+      : "";
+    return;
+  }
+  $("#proofFor").textContent = `${a.label} · ${a.at.toLocaleTimeString()}`;
+  const titles = a.checks.map((title) => ({ title }));
+  if (BUSY.includes(a.state)) {
+    body.innerHTML = statusBlock("wait", SPIN, "Verifying", {
+      waiting: "Checking the TEE and the code it runs, then waiting for the signed answer.",
+      generating: "The request is with the attested TEE and the model is working. The answer counts only once every check passes.",
+      streaming: "The text appears as it streams. It counts only once every check passes.",
+    }[a.state]) + checkList(titles, "pending");
+  } else if (a.state === "verified") {
+    const v = a.data.verification;
+    body.innerHTML = statusBlock("ok", ICON.shieldOk, "Verified", `All checks passed in ${secs(a.data.elapsed_ms)}.`)
+      + checkList(v.checks || [], "done") + evidenceTable(a)
+      + `<div class="actions"><button class="btn" id="download" type="button">${ICON.download}Download proof</button></div>`;
+    $("#download").onclick = () => download(a);
+    for (const b of body.querySelectorAll(".copy")) b.onclick = () => copy(b);
+  } else if (a.state === "failed") {
+    const err = a.error, reasons = (err.verification && err.verification.reasons) || [];
+    body.innerHTML = statusBlock("bad", ICON.shieldX, "Not verified", err.reason || "The request failed.")
+      + checkList(titles, "todo")
+      + (reasons.length ? `<div class="section">Why</div><ol class="checks">${reasons.map((r) => `<li class="todo"><span class="mark"></span><div><p>${esc(r)}</p></div></li>`).join("")}</ol>` : "")
+      + `<div class="section">Technical details</div><div class="tech">${esc(err.message || err.code || "ERROR")}</div>`;
+  } else {
+    body.innerHTML = statusBlock("", ICON.shield, "Stopped", "You stopped this answer before it was verified, so it is discarded.") + checkList(titles, "todo");
+  }
+}
+
+async function copy(button) {
+  try {
+    await navigator.clipboard.writeText(button.dataset.v);
+    button.innerHTML = ICON.check;
+    setTimeout(() => { button.innerHTML = ICON.copy; }, 1200);
+  } catch { /* clipboard unavailable */ }
+}
+
+function download(a) {
+  const proof = {
+    generated_by: "Private AI SDK demo",
+    answered_at: a.at.toISOString(),
+    provider: a.provider,
+    model: a.model,
+    question: a.question,
+    answer: a.text,
+    elapsed_ms: a.data.elapsed_ms,
+    usage: a.data.usage,
+    verification: a.data.verification,
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(proof, null, 2)], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `proof-${String(a.data.verification.evidence.receipt_id || a.id).replace(/[^\w.-]/g, "_")}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// --- Wiring --------------------------------------------------------------------
+const input = $("#input");
+$("#composer").onsubmit = (e) => {
+  e.preventDefault();
+  if (state.busy) { state.ctrl && state.ctrl.abort(); return; }
+  const text = input.value;
+  input.value = "";
+  input.style.height = "";
+  send(text);
+};
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#composer").requestSubmit(); }
+});
+input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 180) + "px"; });
+$("#stream").onchange = updateNote;
+$("#reset").onclick = reset;
+$("#closeProof").onclick = () => $("#proof").classList.remove("open");
+
+setBusy(false);
+showWelcome();
 loadModels();
 </script>
 </body>

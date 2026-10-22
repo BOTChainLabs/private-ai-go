@@ -138,11 +138,11 @@ NEARAI_API_KEY=... go run ./examples/demo -provider near -stream "Say hi"
 PHALA_API_KEY=... NEARAI_API_KEY=... go run ./examples/web              # chat page on http://127.0.0.1:8080
 ```
 
-The chat page shows each answer with the verification it passed. A streamed Phala answer is marked unverified until its receipt checks out; NEAR answers arrive in one piece, already verified. The page listens on localhost; to expose it, pass `-addr` and set `DEMO_PASSWORD`, since every message spends the keys' credits.
+The chat page shows each answer next to its proof: the checks it passed, the evidence, and a downloadable proof file. A streamed Phala answer is marked unverified until its receipt checks out; NEAR answers arrive in one piece, already verified. The page listens on localhost and refuses to listen elsewhere without `DEMO_PASSWORD` (HTTP basic auth), since every message spends the keys' credits.
 
 ## Deployment requirements
 
-- Go 1.25.8 or later.
+- Go 1.25.8 or later. Build with a Go release that still receives security fixes.
 - NEAR AI's GPU attestation is verified by NVIDIA's service at `nras.attestation.nvidia.com`; the host must be able to reach it. Phala does not need it.
 
 ## Security

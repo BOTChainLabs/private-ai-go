@@ -58,12 +58,14 @@ type Keyset struct {
 	TLSPublicKeys      []TLSKey   `json:"tls_public_keys"`
 }
 
+// KeyEntry is a receipt signing key in the keyset.
 type KeyEntry struct {
 	KeyID     string `json:"key_id"`
 	Algo      string `json:"algo"`
 	PublicKey string `json:"public_key"`
 }
 
+// TLSKey is a TLS public key the gateway may serve, by SPKI digest.
 type TLSKey struct {
 	SPKISHA256 string `json:"spki_sha256"`
 	Domain     string `json:"domain"`
@@ -99,22 +101,29 @@ type Verifier struct {
 
 // KeysetDigest computes "sha256:" + hex(sha256(JCS(keyset))) (spec §3.1).
 func KeysetDigest(rawKeyset []byte) (string, error) {
-	c, err := canon.Canonicalize(rawKeyset)
-	if err != nil {
-		return "", fmt.Errorf("canonicalize keyset: %w", err)
-	}
-	sum := sha256.Sum256(c)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	_, digest, err := canonicalKeyset(rawKeyset)
+	return digest, err
 }
 
-// Statement builds the attestation statement (spec §3.2). A nil nonce yields
-// the unchallenged form, which proves binding but not freshness.
-func Statement(keysetDigest string, nonce *string) []byte {
-	n := "null"
-	if nonce != nil {
-		n = `"` + *nonce + `"`
+func canonicalKeyset(rawKeyset []byte) (canonical []byte, digest string, err error) {
+	canonical, err = canon.Canonicalize(rawKeyset)
+	if err != nil {
+		return nil, "", fmt.Errorf("canonicalize keyset: %w", err)
 	}
-	return []byte(`{"keyset_digest":"` + keysetDigest + `","nonce":` + n + `,"purpose":"` + reportPurpose + `"}`)
+	sum := sha256.Sum256(canonical)
+	return canonical, "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// Statement builds the attestation statement (spec §3.2), the JCS form of
+// its three members. A nil nonce yields the unchallenged form, which proves
+// binding but not freshness.
+func Statement(keysetDigest string, nonce *string) []byte {
+	var n any
+	if nonce != nil {
+		n = *nonce
+	}
+	b, _ := canon.Marshal(map[string]any{"keyset_digest": keysetDigest, "nonce": n, "purpose": reportPurpose})
+	return b
 }
 
 // ExpectedReportData is sha256(statement) (spec §3.2).
@@ -134,12 +143,10 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 	ev := rep.Attestation.Evidence
 
 	// Binding: keyset -> digest -> statement -> report_data.
-	keysetJSON, err := canon.Canonicalize(rep.Attestation.WorkloadKeyset)
+	keysetJSON, digest, err := canonicalKeyset(rep.Attestation.WorkloadKeyset)
 	if err != nil {
-		return nil, fmt.Errorf("canonicalize keyset: %w", err)
+		return nil, err
 	}
-	sum := sha256.Sum256(keysetJSON)
-	digest := "sha256:" + hex.EncodeToString(sum[:])
 	if digest != rep.WorkloadKeysetDigest {
 		return nil, fmt.Errorf("keyset digest mismatch: computed %s, served %s", digest, rep.WorkloadKeysetDigest)
 	}
@@ -177,7 +184,7 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 	if !bytes.Equal(q.MRConfigID, wantConfig) {
 		return nil, fmt.Errorf("MRCONFIGID does not bind app_compose")
 	}
-	events, err := replayRTMR3(ev.EventLog, q.RTMR3)
+	events, err := tdx.ReplayRTMR3([]byte(ev.EventLog), q.RTMR3)
 	if err != nil {
 		return nil, err
 	}
@@ -249,13 +256,6 @@ func (v *Verifier) checkWorkload(q QuoteResult, events map[string]string) error 
 		return err
 	}
 	return tdx.App{AppIDs: w.AppIDs, KeyProviders: w.KeyProviders, KMSMeasurements: w.KMSMeasurements}.Check(events)
-}
-
-// dstackEvent is the event type of dstack's RTMR3 runtime events.
-const dstackEvent = tdx.DstackEvent
-
-func replayRTMR3(eventLog string, quoteRTMR3 []byte) (map[string]string, error) {
-	return tdx.ReplayRTMR3([]byte(eventLog), quoteRTMR3)
 }
 
 // keysetMembers is the fixed keyset shape (spec §3.1, Appendix B).
