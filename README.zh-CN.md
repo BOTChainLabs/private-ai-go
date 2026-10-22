@@ -8,7 +8,7 @@ go get github.com/BOTChainLabs/private-ai-go
 
 每次调用都会强制完成证明校验：发送前确认对方运行在真实的 TEE 里，返回后确认结果没有被篡改。只有校验通过的结果才会返回，校验失败直接报错，不会降级到普通模型。
 
-- 需要 Go 1.25.8 及以上（依赖 NEAR 官方 Go SDK）
+- 需要 Go 1.26 及以上，建议用最新的补丁版本编译
 - API Key 由使用方提供（BYOK），费用由厂商直接收取
 - SDK 不保存、不打印 API Key，Prompt 不经过 BotChain 的服务器
 

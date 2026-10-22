@@ -12,7 +12,7 @@ Every call is verified before its result is returned. Before the prompt is sent,
 go get github.com/BOTChainLabs/private-ai-go
 ```
 
-Requires Go 1.25.8 or later.
+Requires Go 1.26 or later.
 
 ## Providers
 
@@ -142,7 +142,7 @@ The chat page shows each answer next to its proof: the checks it passed, the evi
 
 ## Deployment requirements
 
-- Go 1.25.8 or later. Build with a Go release that still receives security fixes.
+- Go 1.26 or later; build with the latest patch release.
 - NEAR AI's GPU attestation is verified by NVIDIA's service at `nras.attestation.nvidia.com`; the host must be able to reach it. Phala does not need it.
 
 ## Security

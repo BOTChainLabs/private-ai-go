@@ -4,7 +4,7 @@ All notable changes to this SDK are documented here.
 
 ## Unreleased
 
-First public release candidate.
+First public release candidate. Requires Go 1.26 or later.
 
 - Phala (ACI `aci/1`): attestation preflight with workload identity, TLS key pinning, signed receipts over the exact bytes, and streaming.
 - NEAR AI: built on NEAR's official Go SDK, with end-to-end encryption, required NVIDIA GPU attestation, workload identity and model-signed responses. A model served from several machines is verified machine by machine.

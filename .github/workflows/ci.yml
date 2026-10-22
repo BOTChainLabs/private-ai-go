@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         # The minimum in go.mod, and the latest release.
-        go: ["1.25.8", "stable"]
+        go: ["1.26.0", "stable"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,3 +27,6 @@ jobs:
         run: go mod tidy -diff
       - run: go vet ./...
       - run: go test -race ./...
+      - name: govulncheck
+        if: matrix.go == 'stable'
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
