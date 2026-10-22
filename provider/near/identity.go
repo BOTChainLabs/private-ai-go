@@ -17,6 +17,12 @@ import (
 
 const identityMaxAge = time.Hour
 
+// learnRounds bounds the extra attestation fetches made for a session whose
+// keys are not established yet. NEAR serves a model from several machines
+// and each fetch reports one of them, so the first fetch may have shown
+// another machine than the one a session uses.
+const learnRounds = 4
+
 // osQuoteVerifier wraps a DCAP verifier so that every quote NEAR's SDK
 // verifies must also come from an accepted dstack OS build.
 func osQuoteVerifier(verify nearai.QuoteVerifier, allowed []tdx.OSMeasurement) nearai.QuoteVerifier {
@@ -79,18 +85,50 @@ type identity struct {
 }
 
 func (id *identity) get(ctx context.Context, model string) (*established, error) {
-	id.mu.Lock()
-	e := id.cache[model]
-	id.mu.Unlock()
-	if e != nil && id.now().Before(e.expires) {
+	if e := id.cached(model); e != nil {
 		return e, nil
 	}
+	return id.refresh(ctx, model)
+}
+
+func (id *identity) cached(model string) *established {
+	id.mu.Lock()
+	defer id.mu.Unlock()
+	if e := id.cache[model]; e != nil && id.now().Before(e.expires) {
+		return e
+	}
+	return nil
+}
+
+// covering returns an identity that covers the session's keys, establishing
+// more of the model's machines when e does not cover them yet.
+func (id *identity) covering(ctx context.Context, model string, e *established, sess nearai.AttestationVerificationResult) (*established, error) {
+	for round := 0; ; round++ {
+		err := e.checkSession(sess)
+		if err == nil {
+			return e, nil
+		}
+		if round == learnRounds {
+			return nil, core.Errorf(core.CodeAttestationFailed, err, "NEAR session")
+		}
+		if e, err = id.refresh(ctx, model); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// refresh establishes the model's identity once more and adds what it proves
+// to the cached identity, which keeps its own expiry.
+func (id *identity) refresh(ctx context.Context, model string) (*established, error) {
 	ch := id.once.DoChan(model, func() (any, error) {
 		ictx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
 		e, err := id.establish(ictx, model)
 		if err != nil {
 			return nil, err
+		}
+		if old := id.cached(model); old != nil {
+			e = old.merge(e)
 		}
 		id.mu.Lock()
 		id.cache[model] = e
@@ -182,6 +220,24 @@ func checkApp(a nearai.Attestation, os []tdx.OSMeasurement, app tdx.App) (string
 		return "", err
 	}
 	return events["app-id"], app.Check(events)
+}
+
+// merge returns e extended by the keys of fresh, expiring with e.
+func (e *established) merge(fresh *established) *established {
+	m := &established{modelAppID: fresh.modelAppID, expires: e.expires}
+	m.gatewaySPKIs = slices.Clone(e.gatewaySPKIs)
+	for _, s := range fresh.gatewaySPKIs {
+		if !slices.Contains(m.gatewaySPKIs, s) {
+			m.gatewaySPKIs = append(m.gatewaySPKIs, s)
+		}
+	}
+	m.signers = slices.Clone(e.signers)
+	for _, s := range fresh.signers {
+		if !m.hasSigner(s) {
+			m.signers = append(m.signers, s)
+		}
+	}
+	return m
 }
 
 func (e *established) hasSigner(s nearai.SigningIdentity) bool {

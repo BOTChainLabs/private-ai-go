@@ -44,6 +44,10 @@ type fakeSource struct {
 	fetches atomic.Int32
 	gateway nearai.Attestation
 	models  []nearai.Attestation
+	// machines, when set, are reported in turn by successive model fetches,
+	// as NEAR's load balancer does.
+	machines [][]nearai.Attestation
+	next     atomic.Int32
 }
 
 func (s *fakeSource) FetchGatewayAttestation(context.Context, nearai.FetchOptions) (nearai.FetchedGatewayAttestation, error) {
@@ -52,6 +56,10 @@ func (s *fakeSource) FetchGatewayAttestation(context.Context, nearai.FetchOption
 }
 
 func (s *fakeSource) FetchModelAttestations(context.Context, string, nearai.FetchOptions) (nearai.FetchedModelAttestations, error) {
+	if len(s.machines) > 0 {
+		n := int(s.next.Add(1)-1) % len(s.machines)
+		return nearai.FetchedModelAttestations{Attestations: s.machines[n]}, nil
+	}
 	return nearai.FetchedModelAttestations{Attestations: s.models}, nil
 }
 

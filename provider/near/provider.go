@@ -191,8 +191,11 @@ func (p *Provider) checkIdentity(ctx, callerCtx context.Context, model string) (
 	if err != nil {
 		return nil, core.Wrap(callerCtx, codeFor(err), err, "attest NEAR session")
 	}
-	if err := e.checkSession(sess); err != nil {
-		return nil, core.Errorf(core.CodeAttestationFailed, err, "NEAR session")
+	if e, err = p.ident.covering(ctx, model, e, sess); err != nil {
+		if callerCtx.Err() != nil {
+			return nil, callerCtx.Err()
+		}
+		return nil, err
 	}
 	return e, nil
 }

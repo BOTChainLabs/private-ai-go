@@ -2,11 +2,13 @@ package privateai
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/BOTChainLabs/private-ai-go/core"
+	"github.com/BOTChainLabs/private-ai-go/internal/tdx"
 	"github.com/BOTChainLabs/private-ai-go/provider/near"
 	"github.com/BOTChainLabs/private-ai-go/provider/phala"
 )
@@ -24,6 +26,10 @@ type (
 	ModelEntry   = core.ModelEntry
 	Policy       = core.Policy
 	Error        = core.Error
+
+	// OSMeasurement is a dstack OS build, by its boot measurements MRTD and
+	// RTMR0-2 (hex).
+	OSMeasurement = tdx.OSMeasurement
 )
 
 const (
@@ -55,6 +61,15 @@ type ProviderConfig struct {
 	// value accepts the TCB statuses UpToDate and OutOfDate and any compose
 	// the provider's built-in identity checks allow.
 	Policy Policy
+
+	// ExtraOSBuilds and ExtraAppIDs add to the provider's built-in identity
+	// what this SDK version does not know yet: a provider OS upgrade, or a
+	// NEAR AI model served as its own app (ExtraAppIDs extends NEAR's model
+	// apps and Phala's gateway app). Verification refuses an unknown build
+	// or app and names it in the error; add it here only once the provider
+	// has confirmed it.
+	ExtraOSBuilds []OSMeasurement
+	ExtraAppIDs   []string
 }
 
 type Config struct {
@@ -103,14 +118,54 @@ func (c *Client) init(cfg Config) error {
 }
 
 func newProvider(id ProviderID, pc ProviderConfig, timeout time.Duration) (core.Provider, error) {
+	if err := pc.checkExtras(); err != nil {
+		return nil, fmt.Errorf("privateai: %s: %w", id, err)
+	}
 	switch id {
 	case Phala:
-		return phala.New(phala.Options{APIKey: pc.APIKey, BaseURL: pc.BaseURL, Timeout: timeout, Policy: pc.Policy})
+		return phala.New(phalaOptions(pc, timeout))
 	case NEAR:
-		return near.New(near.Options{APIKey: pc.APIKey, BaseURL: pc.BaseURL, Timeout: timeout, Policy: pc.Policy})
+		return near.New(nearOptions(pc, timeout))
 	default:
 		return nil, fmt.Errorf("privateai: unknown provider %q", id)
 	}
+}
+
+func phalaOptions(pc ProviderConfig, timeout time.Duration) phala.Options {
+	w := phala.ProductionWorkload()
+	w.OS = append(w.OS, pc.ExtraOSBuilds...)
+	w.AppIDs = append(w.AppIDs, pc.ExtraAppIDs...)
+	return phala.Options{APIKey: pc.APIKey, BaseURL: pc.BaseURL, Timeout: timeout, Policy: pc.Policy, Workload: &w}
+}
+
+func nearOptions(pc ProviderConfig, timeout time.Duration) near.Options {
+	w := near.ProductionWorkload()
+	w.OS = append(w.OS, pc.ExtraOSBuilds...)
+	w.Model.AppIDs = append(w.Model.AppIDs, pc.ExtraAppIDs...)
+	return near.Options{APIKey: pc.APIKey, BaseURL: pc.BaseURL, Timeout: timeout, Policy: pc.Policy, Workload: &w}
+}
+
+// checkExtras rejects malformed identity values, which would otherwise
+// never match and fail every call with a misleading error.
+func (pc ProviderConfig) checkExtras() error {
+	for i, b := range pc.ExtraOSBuilds {
+		for _, f := range []struct{ name, v string }{{"MRTD", b.MRTD}, {"RTMR0", b.RTMR0}, {"RTMR1", b.RTMR1}, {"RTMR2", b.RTMR2}} {
+			if !isHex(f.v, 48) {
+				return fmt.Errorf("ExtraOSBuilds[%d].%s must be 96 hex characters", i, f.name)
+			}
+		}
+	}
+	for i, a := range pc.ExtraAppIDs {
+		if !isHex(a, 20) {
+			return fmt.Errorf("ExtraAppIDs[%d] must be 40 hex characters", i)
+		}
+	}
+	return nil
+}
+
+func isHex(s string, n int) bool {
+	b, err := hex.DecodeString(s)
+	return err == nil && len(b) == n
 }
 
 // Close releases every provider's connections and background work. The

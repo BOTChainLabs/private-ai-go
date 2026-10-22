@@ -99,7 +99,15 @@ privateai.Phala: {
 },
 ```
 
-Phala 和 NEAR 生产环境的身份（系统镜像、应用、KMS）已内置在 SDK 中。厂商正常发布新版本不需要改动；如果厂商升级系统镜像，或者 NEAR 上线了新模型（新的应用 ID），校验会失败，错误信息里带有新值，确认后更新 SDK。
+Phala 和 NEAR 生产环境的身份（系统镜像、应用、KMS）已内置在 SDK 中。厂商正常发布新版本不需要改动；如果厂商升级系统镜像，或者 NEAR 上线了新模型（新的应用 ID），校验会失败，错误信息里带有新值。跟厂商确认后，可以先自行加上，不用等 SDK 发版：
+
+```go
+privateai.NEAR: {
+    APIKey:        os.Getenv("NEARAI_API_KEY"),
+    ExtraOSBuilds: []privateai.OSMeasurement{{MRTD: "...", RTMR0: "...", RTMR1: "...", RTMR2: "..."}},
+    ExtraAppIDs:   []string{"..."}, // NEAR 模型的应用 ID
+},
+```
 
 NEAR 的 GPU 校验需要访问 NVIDIA 的证明服务（nras.attestation.nvidia.com），部署前请确认服务器能访问。
 

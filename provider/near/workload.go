@@ -9,10 +9,13 @@ import "github.com/BOTChainLabs/private-ai-go/internal/tdx"
 //   - OS: the dstack OS builds, by MRTD and RTMR0-2 (not changeable by the
 //     guest).
 //   - Gateway and Model: NEAR's dstack apps and the KMS that released their
-//     keys, read from the RTMR3 event log. The KMS releases keys only to
-//     compose versions authorized for the app, so NEAR's releases (the model
-//     compose differs between replicas) are accepted without listing
-//     compose hashes.
+//     keys (by its root key), read from the RTMR3 event log. The KMS
+//     releases keys only to compose versions authorized for the app, so
+//     NEAR's releases (the model compose differs between replicas) are
+//     accepted without listing compose hashes. The KMS's own build
+//     (KMSMeasurements, the mr-kms event) is left unpinned for the same
+//     reason: NEAR upgrades it under the same root key, and on 2026-10-21
+//     two builds served at once.
 //
 // A field left empty is not checked.
 type Workload struct {
@@ -25,11 +28,13 @@ type Workload struct {
 // {"name":"kms","id":"<KMS public key, DER>"}.
 const nearKMS = "7b226e616d65223a226b6d73222c226964223a223330353933303133303630373261383634386365336430323031303630383261383634386365336430333031303730333432303030343339346161656432633734356536613435376362383335663766343734323366353766663365616437316239326162666636626463313464393035623331396632653133393631623432633530373430646165343439386439633531646437613265323237363630633965356335303430383363646130366236633131363832227d"
 
-// ProductionWorkload is NEAR AI Cloud's gateway and the z-ai/glm-5.3-flash
-// model deployment, as attested on 2026-10-21 and stable across repeated
-// samples (model replicas run differing compose versions). Other models run
-// as other apps: calling one fails with its observed app ID, which is then
-// added to Model.AppIDs. A dstack OS upgrade fails the same way.
+// ProductionWorkload is NEAR AI Cloud's gateway and model deployment, as
+// attested on 2026-10-21. NEAR's own models run as one app (seen for
+// z-ai/glm-5.3-flash, Qwen/Qwen3.6-35B-A3B-FP8, Qwen/Qwen3.8-27B and
+// Qwen/Qwen3-VL-30B-A3B-Instruct); models NEAR routes to third parties
+// publish no attestation and are refused. A model served as a new app, or a
+// dstack OS upgrade, fails with the observed values, which are then added
+// here.
 func ProductionWorkload() Workload {
 	return Workload{
 		OS: []tdx.OSMeasurement{
@@ -57,9 +62,8 @@ func ProductionWorkload() Workload {
 			KeyProviders: []string{nearKMS},
 		},
 		Model: tdx.App{
-			AppIDs:          []string{"2c0a0c96cb6dbd659bf1446e2f3fce58172ff91b"}, // z-ai/glm-5.3-flash
-			KeyProviders:    []string{nearKMS},
-			KMSMeasurements: []string{"a1fc13604b253a3f664897dd486fd6dd0803242f92ff8e4f1c5cc12d1fb7e641"},
+			AppIDs:       []string{"2c0a0c96cb6dbd659bf1446e2f3fce58172ff91b"},
+			KeyProviders: []string{nearKMS},
 		},
 	}
 }

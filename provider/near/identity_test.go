@@ -92,6 +92,9 @@ func TestSessionMustUseEstablishedKeys(t *testing.T) {
 		if f.requests.Load() != 0 {
 			t.Fatal("request sent under an unchecked model key")
 		}
+		if n := f.src.fetches.Load(); n != 1+learnRounds {
+			t.Fatalf("%d identity rounds, want %d", n, 1+learnRounds)
+		}
 	})
 	t.Run("gateway", func(t *testing.T) {
 		f, p := newFake(t, gatewayKnobs{})
@@ -102,6 +105,38 @@ func TestSessionMustUseEstablishedKeys(t *testing.T) {
 			t.Fatal("request sent through an unchecked gateway")
 		}
 	})
+}
+
+// NEAR serves a model from two machines and each attestation fetch reports
+// one. A session on the machine the first fetch did not show is established
+// by fetching again, and both machines stay established.
+func TestSessionOnAnotherMachine(t *testing.T) {
+	f, p := newFake(t, gatewayKnobs{})
+	b := fixtureModel()
+	b.Signer = nearai.SigningIdentity{SigningAlgo: nearai.Ed25519, SigningAddress: "b0b0"}
+	f.src.machines = [][]nearai.Attestation{{fixtureModel()}, {b}}
+	f.session.Models = []nearai.VerifiedAttestation{{Signer: b.Signer}}
+	f.verify = func(id string) (nearai.VerifiedCompletionResult, error) {
+		r, _ := verified("provider_tee")(id)
+		r.Attestation.Signer = b.Signer
+		return r, nil
+	}
+	if _, err := p.Infer(context.Background(), testReq); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.src.fetches.Load(); n != 2 {
+		t.Fatalf("%d identity rounds, want 2", n)
+	}
+
+	// Back on the first machine: already established, nothing fetched.
+	f.session.Models = []nearai.VerifiedAttestation{{Signer: fixtureModel().Signer}}
+	f.verify = verified("provider_tee")
+	if _, err := p.Infer(context.Background(), testReq); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.src.fetches.Load(); n != 2 {
+		t.Fatalf("%d identity rounds, want 2", n)
+	}
 }
 
 func TestResponseSignerMustBeEstablished(t *testing.T) {
