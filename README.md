@@ -106,7 +106,7 @@ The production identities of Phala and NEAR AI (OS builds, apps, KMS) are built 
 
 ## Errors
 
-Every error unwraps to `*privateai.Error` with a stable `Code`:
+Every error unwraps to `*privateai.Error` with a stable `Code` (constants `privateai.CodeInvalidRequest` and so on):
 
 | Code | Meaning |
 | --- | --- |
@@ -121,6 +121,16 @@ Every error unwraps to `*privateai.Error` with a stable `Code`:
 | `PROVIDER_ERROR` | The provider returned an error (authentication, balance, rate limit) |
 
 Errors raised after a request was sent carry a `Verification` with the status (`Failed` or `Unverified`) and the reasons. Cancelling the caller's context returns the context's own error.
+
+## Examples
+
+```bash
+PHALA_API_KEY=... go run ./examples/demo "Say hi"                       # command line
+NEARAI_API_KEY=... go run ./examples/demo -provider near -stream "Say hi"
+PHALA_API_KEY=... NEARAI_API_KEY=... go run ./examples/web              # chat page on http://127.0.0.1:8080
+```
+
+The chat page shows each answer with the verification it passed. A streamed Phala answer is marked unverified until its receipt checks out; NEAR answers arrive in one piece, already verified. The page listens on localhost; to expose it, pass `-addr` and set `DEMO_PASSWORD`, since every message spends the keys' credits.
 
 ## Deployment requirements
 

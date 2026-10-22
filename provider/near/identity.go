@@ -117,6 +117,9 @@ func (id *identity) establish(ctx context.Context, model string) (*established, 
 	if err != nil {
 		return nil, core.Wrap(noCaller, codeFor(err), err, "fetch gateway attestation")
 	}
+	if err := precheckOS(g.Attestation, id.workload.OS); err != nil {
+		return nil, core.Errorf(core.CodeAttestationFailed, err, "gateway")
+	}
 	vg, err := id.verifyGateway(ctx, g.Attestation, g.ClientBinding)
 	if err != nil {
 		return nil, core.Wrap(noCaller, codeFor(err), err, "verify gateway attestation")
@@ -135,6 +138,9 @@ func (id *identity) establish(ctx context.Context, model string) (*established, 
 	}
 	// Every instance must pass, as NEAR's SDK requires of its own reports.
 	for _, a := range m.Attestations {
+		if err := precheckOS(a, id.workload.OS); err != nil {
+			return nil, core.Errorf(core.CodeAttestationFailed, err, "model %s instance %s", model, a.InstanceID)
+		}
 		vm, err := id.verifyModel(ctx, a, m.ClientBinding)
 		if err != nil {
 			return nil, core.Wrap(noCaller, codeFor(err), err, "verify model attestation")
@@ -147,6 +153,18 @@ func (id *identity) establish(ctx context.Context, model string) (*established, 
 		e.signers = append(e.signers, vm.Signer)
 	}
 	return e, nil
+}
+
+// precheckOS names an unknown OS build, which the SDK's verification would
+// report only as a failed quote (an OS upgrade on NEAR's side looks like
+// this). It decides nothing on its own: the quote is not verified yet, and
+// the SDK's verification checks the OS again on the verified quote.
+func precheckOS(a nearai.Attestation, os []tdx.OSMeasurement) error {
+	m, err := tdx.ParseHexQuote(a.IntelQuote)
+	if err != nil {
+		return nil // reported by the SDK's verification
+	}
+	return tdx.CheckOS(m, os)
 }
 
 // checkApp checks the OS build and the dstack app identity of a report whose

@@ -126,7 +126,10 @@ NEAR 的 GPU 校验需要访问 NVIDIA 的证明服务（nras.attestation.nvidia
 ```sh
 PHALA_API_KEY=... go run ./examples/demo "Say hi"
 NEARAI_API_KEY=... go run ./examples/demo -provider near -stream "Say hi"
+PHALA_API_KEY=... NEARAI_API_KEY=... go run ./examples/web   # 网页聊天，打开 http://127.0.0.1:8080
 ```
+
+网页版每条回答都显示校验结果。Phala 流式回答在 Receipt 验签通过前标为“未验证”；NEAR 校验通过后一次性返回。默认只监听本机；要对外开放，用 `-addr` 并设置 `DEMO_PASSWORD`，因为每条消息都消耗 Key 的余额。
 
 ## 测试
 
@@ -148,6 +151,7 @@ provider/phala/   Phala：ACI 预检、TLS 绑定、Receipt 验签
 provider/near/    NEAR AI：封装官方 Go SDK
 internal/oai/     OpenAI 兼容的请求、响应和 SSE 解析
 internal/canon/   ACI 文档的规范化（JCS）
-examples/demo/    Demo
+examples/demo/    命令行 Demo
+examples/web/     网页聊天 Demo
 tools/crosscheck/ 与 Phala 官方验证库的交叉验证
 ```

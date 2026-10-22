@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Private AI Demo</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #6b7280; --line: #e3e6eb;
+    --accent: #2f6fed; --ok: #16794c; --ok-bg: #e6f5ec; --warn: #9a6700; --warn-bg: #fff4d6;
+    --bad: #b42318; --bad-bg: #fde8e7; --user: #2f6fed; --user-text: #ffffff; --code: #f1f3f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1218; --panel: #171b23; --text: #e6e8ec; --muted: #9aa3b2; --line: #2a303b;
+      --accent: #6b9bff; --ok: #4ccb8a; --ok-bg: #12301f; --warn: #f0c050; --warn-bg: #3a2f10;
+      --bad: #ff7b72; --bad-bg: #3d1716; --user: #3b6fe0; --user-text: #ffffff; --code: #1f2430;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .app { max-width: 880px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column; padding: 0 16px; }
+  header { padding: 22px 0 14px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0; font-size: 20px; font-weight: 650; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13.5px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+  select, button, textarea { font: inherit; color: inherit; }
+  select { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+  label.toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); cursor: pointer; }
+  .spacer { flex: 1; }
+  .ghost { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; color: var(--muted); }
+  #log { flex: 1; padding: 18px 0; display: flex; flex-direction: column; gap: 14px; }
+  .empty { color: var(--muted); text-align: center; margin: 48px 0; font-size: 14px; }
+  .msg { max-width: 92%; }
+  .msg.user { align-self: flex-end; background: var(--user); color: var(--user-text); padding: 9px 13px; border-radius: 14px 14px 4px 14px; white-space: pre-wrap; }
+  .msg.bot { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); border-radius: 14px 14px 14px 4px; overflow: hidden; }
+  .msg.bot .text { padding: 10px 14px; white-space: pre-wrap; min-height: 1.5em; }
+  .msg.bot.pending .text { color: var(--muted); }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 8px 14px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
+  .badge { font-weight: 600; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+  .badge.ok { color: var(--ok); background: var(--ok-bg); }
+  .badge.warn { color: var(--warn); background: var(--warn-bg); }
+  .badge.bad { color: var(--bad); background: var(--bad-bg); }
+  .bar button { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-size: 12.5px; }
+  .details { display: none; padding: 4px 14px 12px; font-size: 12.5px; }
+  .details.open { display: block; }
+  .details table { border-collapse: collapse; width: 100%; }
+  .details td { padding: 3px 0; vertical-align: top; }
+  .details td:first-child { color: var(--muted); width: 128px; padding-right: 10px; }
+  .details code { background: var(--code); padding: 1px 5px; border-radius: 4px; word-break: break-all; font-size: 11.5px; }
+  .error { color: var(--bad); padding: 0 14px 10px; font-size: 13px; }
+  .composer { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0 18px; display: flex; gap: 10px; border-top: 1px solid var(--line); }
+  textarea { flex: 1; resize: none; height: 46px; max-height: 160px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; }
+  textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .send { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 0 18px; font-weight: 600; cursor: pointer; }
+  .send:disabled { opacity: .5; cursor: default; }
+  .note { color: var(--muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Private AI Demo</h1>
+    <p>Every answer is checked before it counts: the TEE hardware, the code it runs, and a signature over the exact bytes.</p>
+  </header>
+
+  <div class="toolbar">
+    <select id="model" aria-label="Model"></select>
+    <label class="toggle"><input type="checkbox" id="stream" checked> Stream</label>
+    <span class="note" id="streamNote"></span>
+    <span class="spacer"></span>
+    <button class="ghost" id="clear">Clear</button>
+  </div>
+
+  <div id="log"><div class="empty">Ask anything. Each answer shows how it was verified.</div></div>
+
+  <div class="composer">
+    <textarea id="input" placeholder="Type a message. Enter to send, Shift+Enter for a new line"></textarea>
+    <button class="send" id="send">Send</button>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const turns = [];
+let busy = false;
+
+async function loadModels() {
+  const res = await fetch("/api/models");
+  const models = await res.json();
+  for (const m of models) {
+    const opt = el("option", null, `${m.provider === "near" ? "NEAR AI" : "Phala"} · ${m.model}`);
+    opt.value = `${m.provider}|${m.model}`;
+    $("model").append(opt);
+  }
+  updateNote();
+}
+
+function selected() {
+  const [provider, model] = $("model").value.split("|");
+  return { provider, model };
+}
+
+function updateNote() {
+  const near = selected().provider === "near";
+  $("streamNote").textContent = near && $("stream").checked ? "NEAR returns the verified answer in one piece" : "";
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+function addUser(text) {
+  const empty = $("log").querySelector(".empty");
+  if (empty) empty.remove();
+  $("log").append(el("div", "msg user", text));
+}
+
+function addBot() {
+  const box = el("div", "msg bot pending");
+  const text = el("div", "text");
+  const bar = el("div", "bar");
+  const badge = el("span", "badge warn", "Waiting for the TEE…");
+  bar.append(badge);
+  box.append(text, bar);
+  $("log").append(box);
+  scroll();
+  return { box, text, bar, badge };
+}
+
+function scroll() { window.scrollTo({ top: document.body.scrollHeight }); }
+
+function short(h) { return h && h.length > 20 ? h.slice(0, 12) + "…" + h.slice(-6) : (h || ""); }
+
+function showVerified(view, data) {
+  const v = data.verification;
+  view.box.classList.remove("pending");
+  view.badge.className = "badge ok";
+  view.badge.textContent = "Verified ✓";
+  const provider = v.provider === "near" ? "NEAR AI" : "Phala";
+  const secs = (data.elapsed_ms / 1000).toFixed(1) + " s";
+  const tokens = data.usage && data.usage.total_tokens ? ` · ${data.usage.total_tokens} tokens` : "";
+  view.bar.append(el("span", null, `${provider} · TCB ${v.tcb_status || "?"} · ${secs}${tokens}`));
+  addDetails(view, v);
+}
+
+function addDetails(view, v) {
+  if (!v) return;
+  const toggle = el("button", null, "Details");
+  const details = el("div", "details");
+  const rows = [
+    ["Status", v.status], ["Route", v.route], ["Model", v.model], ["TCB status", v.tcb_status],
+    ["App ID", v.app_id], ["Compose hash", v.compose_hash], ["OS image", v.os_image_hash],
+    ["Keyset", v.keyset_digest], ["Receipt", v.receipt_id], ["Upstream session", v.session_id],
+    ["Signed evidence", v.receipt_bytes ? v.receipt_bytes + " bytes" : ""],
+    ["Reasons", (v.reasons || []).join("; ")],
+  ].filter(([, val]) => val);
+  const table = el("table");
+  for (const [k, val] of rows) {
+    const tr = el("tr");
+    const code = el("code", null, String(val));
+    const td = el("td");
+    td.append(code);
+    tr.append(el("td", null, k), td);
+    table.append(tr);
+  }
+  details.append(table);
+  toggle.onclick = () => { details.classList.toggle("open"); toggle.textContent = details.classList.contains("open") ? "Hide" : "Details"; };
+  view.bar.append(toggle);
+  view.box.append(details);
+}
+
+function showError(view, err) {
+  view.box.classList.remove("pending");
+  view.badge.className = "badge bad";
+  view.badge.textContent = "Not verified ✗";
+  view.bar.append(el("span", null, err.code || "ERROR"));
+  view.box.insertBefore(el("div", "error", err.message || "Request failed"), view.bar);
+  addDetails(view, err.verification);
+}
+
+async function send() {
+  const content = $("input").value.trim();
+  if (!content || busy) return;
+  busy = true;
+  $("send").disabled = true;
+  $("input").value = "";
+  addUser(content);
+  turns.push({ role: "user", content });
+  const view = addBot();
+  const { provider, model } = selected();
+  const stream = $("stream").checked;
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, model, messages: turns, stream }),
+    });
+    const isSSE = (res.headers.get("Content-Type") || "").startsWith("text/event-stream");
+    if (!isSSE) {
+      const data = await res.json();
+      if (!res.ok) { showError(view, data.error || {}); turns.pop(); return; }
+      view.text.textContent = data.content;
+      turns.push({ role: "assistant", content: data.content });
+      showVerified(view, data);
+      return;
+    }
+    view.badge.textContent = "Streaming · not verified yet";
+    let answer = "", settled = false;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        const event = (block.match(/^event: (.*)$/m) || [])[1];
+        const data = JSON.parse((block.match(/^data: (.*)$/m) || [])[1] || "{}");
+        if (event === "delta") { answer += data.content; view.text.textContent = answer; scroll(); }
+        if (event === "verified") { settled = true; turns.push({ role: "assistant", content: answer }); showVerified(view, data); }
+        if (event === "error") { settled = true; showError(view, data.error || {}); turns.pop(); }
+      }
+    }
+    if (!settled) { showError(view, { code: "NETWORK", message: "The stream ended before verification" }); turns.pop(); }
+  } catch (e) {
+    showError(view, { code: "NETWORK", message: e.message });
+    turns.pop();
+  } finally {
+    busy = false;
+    $("send").disabled = false;
+    $("input").focus();
+    scroll();
+  }
+}
+
+$("send").onclick = send;
+$("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+$("model").onchange = updateNote;
+$("stream").onchange = updateNote;
+$("clear").onclick = () => { if (busy) return; turns.length = 0; $("log").innerHTML = '<div class="empty">Ask anything. Each answer shows how it was verified.</div>'; };
+loadModels();
+</script>
+</body>
+</html>

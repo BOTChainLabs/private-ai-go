@@ -130,6 +130,21 @@ func TestIdentityFailureBlocksSend(t *testing.T) {
 	}
 }
 
+// An OS upgrade on NEAR's side is refused with the new measurements named,
+// before anything is sent.
+func TestUnknownOSBuildIsNamed(t *testing.T) {
+	f, p := newFake(t, gatewayKnobs{})
+	p.ident.workload.OS = p.ident.workload.OS[:1] // gateway build only
+	_, err := p.Infer(context.Background(), testReq)
+	e := assertCode(t, err, core.CodeAttestationFailed)
+	if !strings.Contains(e.Error(), "unknown OS build: MRTD df4d77c8") {
+		t.Fatalf("err = %v", e)
+	}
+	if f.requests.Load() != 0 {
+		t.Fatal("request sent to an unknown OS build")
+	}
+}
+
 func TestIdentityIsCached(t *testing.T) {
 	f, p := newFake(t, gatewayKnobs{})
 	for range 3 {

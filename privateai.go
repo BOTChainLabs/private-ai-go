@@ -35,6 +35,19 @@ const (
 	Unverified = core.Unverified
 )
 
+// Error codes; see core for their meaning.
+const (
+	CodeInvalidRequest      = core.CodeInvalidRequest
+	CodeModelNotAllowed     = core.CodeModelNotAllowed
+	CodeAttestationFailed   = core.CodeAttestationFailed
+	CodeTLSPinMismatch      = core.CodeTLSPinMismatch
+	CodeReceiptInvalid      = core.CodeReceiptInvalid
+	CodeRouteNotTEE         = core.CodeRouteNotTEE
+	CodeEvidenceUnavailable = core.CodeEvidenceUnavailable
+	CodeVerifierUnavailable = core.CodeVerifierUnavailable
+	CodeProviderError       = core.CodeProviderError
+)
+
 type ProviderConfig struct {
 	APIKey  string
 	BaseURL string // optional, for testing
