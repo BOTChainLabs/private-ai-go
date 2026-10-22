@@ -566,11 +566,32 @@ function renderProof() {
 }
 
 async function copy(button) {
+  const text = button.dataset.v;
+  let ok;
   try {
-    await navigator.clipboard.writeText(button.dataset.v);
-    button.innerHTML = ICON.check;
-    setTimeout(() => { button.innerHTML = ICON.copy; }, 1200);
-  } catch { /* clipboard unavailable */ }
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch {
+    ok = copyFallback(text);
+  }
+  button.innerHTML = ok ? ICON.check : ICON.x;
+  button.title = ok ? "Copied" : "Copy failed";
+  setTimeout(() => { button.innerHTML = ICON.copy; button.title = "Copy"; }, 1200);
+}
+
+// The Clipboard API exists only on secure pages (localhost or HTTPS); a demo
+// served over plain HTTP falls back to a selection copy.
+function copyFallback(text) {
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.append(area);
+  area.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { /* unsupported */ }
+  area.remove();
+  return ok;
 }
 
 function download(a) {
