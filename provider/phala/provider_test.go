@@ -22,6 +22,8 @@ import (
 
 	"github.com/BOTChainLabs/private-ai-go/core"
 	"github.com/BOTChainLabs/private-ai-go/internal/canon"
+	"github.com/BOTChainLabs/private-ai-go/internal/e2ee"
+	"github.com/BOTChainLabs/private-ai-go/internal/e2ee/e2eetest"
 	"github.com/BOTChainLabs/private-ai-go/internal/tdx"
 )
 
@@ -48,7 +50,12 @@ type fakeGateway struct {
 	notRequired     bool
 	noReceiptHeader bool // receipt is then looked up by completion id
 	streamError     bool
-	receiptDigest   string // overrides the digest the receipt names
+	receiptDigest   string            // overrides the digest the receipt names
+	e2ee            *e2eetest.Service // terminates E2EE v2 when set (call rotate after)
+	noTLSKey        bool              // keyset lists no TLS key (call rotate after)
+	futureSuite     bool              // keyset lists an E2EE suite of unknown shape first (call rotate after)
+	plainResponse   bool              // answers an E2EE request in plaintext
+	lastWire        []byte            // the request body as received
 	receipt404      atomic.Int32
 	attestations    atomic.Int32
 	chats           atomic.Int32 // chat requests received
@@ -108,6 +115,35 @@ func sseParts(withError bool) [][]byte {
 	return out
 }
 
+func (g *fakeGateway) e2eeVersions() []string {
+	if g.e2ee == nil {
+		return []string{}
+	}
+	return []string{"2"}
+}
+
+// sealParts encrypts a response the way the gateway does: the body, or each
+// data event of a stream.
+func sealParts(x *e2eetest.Exchange, parts [][]byte, stream bool) [][]byte {
+	out := make([][]byte, len(parts))
+	for i, p := range parts {
+		data, isEvent := bytes.CutPrefix(p, []byte("data: {"))
+		switch {
+		case !stream:
+			out[i], _ = x.SealResponse(p)
+		case isEvent:
+			sealed, err := x.SealEvent(append([]byte("{"), bytes.TrimSuffix(data, []byte("\n\n"))...))
+			if err != nil {
+				panic(err)
+			}
+			out[i] = append(append([]byte("data: "), sealed...), "\n\n"...)
+		default:
+			out[i] = p
+		}
+	}
+	return out
+}
+
 // quote stands in for DCAP verification of the fake gateway's quote.
 func (g *fakeGateway) quote(_ context.Context, hexQuote string) (QuoteResult, error) {
 	rd, err := hex.DecodeString(hexQuote)
@@ -151,12 +187,25 @@ func (g *fakeGateway) rotate(seed byte) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.key = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
+	e2eeKeys, tlsKeys := []any{}, []any{map[string]any{"spki_sha256": g.pin, "domain": g.domain}}
+	if g.e2ee != nil {
+		e2eeKeys = []any{
+			map[string]any{"key_id": "e1", "algo": "secp256k1-aes-256-gcm-hkdf-sha256", "public_key": "04" + strings.Repeat("ab", 64)},
+			map[string]any{"key_id": "e2", "algo": e2ee.Algo, "public_key": g.e2ee.PublicHex()},
+		}
+	}
+	if g.futureSuite {
+		e2eeKeys = append([]any{map[string]any{"key_id": "e3", "algo": "mlkem768-x25519-v3", "public_key": map[string]any{"kty": "OKP", "x": "abc"}}}, e2eeKeys...)
+	}
+	if g.noTLSKey {
+		tlsKeys = []any{}
+	}
 	g.keyset, _ = json.Marshal(map[string]any{
 		"subject":              nil,
 		"not_after":            time.Now().Add(30 * 24 * time.Hour).Unix(),
 		"receipt_signing_keys": []any{map[string]any{"key_id": "k1", "algo": "ed25519", "public_key": hex.EncodeToString(g.key.Public().(ed25519.PublicKey))}},
-		"e2ee_public_keys":     []any{},
-		"tls_public_keys":      []any{map[string]any{"spki_sha256": g.pin, "domain": g.domain}},
+		"e2ee_public_keys":     e2eeKeys,
+		"tls_public_keys":      tlsKeys,
 	})
 	g.digest, _ = KeysetDigest(g.keyset)
 }
@@ -187,12 +236,22 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 					"app_compose": g.appCompose,
 				},
 			},
-			"service_capabilities": map[string]any{"serving": "aggregator"},
+			"service_capabilities": map[string]any{"serving": "aggregator", "supported_e2ee_versions": g.e2eeVersions()},
 		})
 
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 		g.chats.Add(1)
-		body, _ := io.ReadAll(r.Body)
+		wire, _ := io.ReadAll(r.Body)
+		body := wire
+		var x *e2eetest.Exchange
+		if g.e2ee != nil && r.Header.Get("X-E2EE-Version") != "" {
+			var err error
+			if x, err = g.e2ee.OpenRequest(r.Header, wire, time.Now()); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			body = x.Hashed
+		}
 		var parsed struct {
 			Stream bool `json:"stream"`
 		}
@@ -204,8 +263,12 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		} else {
 			parts = [][]byte{[]byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"hello from tee"}}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)}
 		}
+		if x != nil && !g.plainResponse {
+			parts = sealParts(x, parts, parsed.Stream)
+			w.Header().Set("X-E2EE-Applied", "true")
+		}
 		g.mu.Lock()
-		g.lastReq, g.lastResp = body, bytes.Join(parts, nil)
+		g.lastReq, g.lastWire, g.lastResp = body, wire, bytes.Join(parts, nil)
 		g.mu.Unlock()
 		if !g.noReceiptHeader {
 			w.Header().Set("X-Receipt-Id", "rcpt-1")
@@ -462,4 +525,17 @@ func TestLiveAttestation(t *testing.T) {
 	t.Logf("verified keyset %s (not_after %s)", id.KeysetDigest, id.NotAfter.UTC())
 	t.Logf("TCB %s, compose %s, serving %s", id.TCBStatus, id.ComposeHash, id.Serving)
 	t.Logf("source %s@%s, TLS pins %v", id.RepoURL, id.RepoCommit, id.TLSPins)
+
+	ep, err := New(Options{APIKey: "unused-for-attestation", E2EE: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eid, err := ep.Attest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eid.E2EEKey == "" {
+		t.Fatal("no attested E2EE key")
+	}
+	t.Logf("attested E2EE v2 key %s", eid.E2EEKey)
 }

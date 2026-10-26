@@ -1,11 +1,12 @@
 // Package privateai calls confidential (TEE) AI inference at Phala and NEAR
-// AI and returns a result only after verifying where and how it was
-// produced.
+// AI, or through a self-hosted Private AI Gateway, and returns a result only
+// after verifying where and how it was produced.
 //
 // Before a prompt is sent, the provider's attestation is checked: a genuine
 // Intel TDX machine, the expected OS build and application, and the TLS key
 // the connection is pinned to. After the response, the provider's signature
-// over the exact request and response bytes is checked.
+// over the exact request and response bytes is checked. With E2EE, message
+// content is also encrypted to the attested gateway.
 //
 // A nil error from Infer means the result is Verified. Anything else —
 // failed checks, missing evidence, an unreachable attestation service —

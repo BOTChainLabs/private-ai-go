@@ -66,6 +66,8 @@ type Reader struct {
 	ID string
 	// Usage is set by the final usage event, when the server sends one.
 	Usage core.Usage
+	// Open, when set, decrypts each event's payload before it is read.
+	Open func(data []byte) ([]byte, error)
 
 	done bool
 	err  error
@@ -100,6 +102,11 @@ func (r *Reader) Next() (core.Chunk, error) {
 			r.done = true
 			return core.Chunk{}, io.EOF
 		case ok:
+			if r.Open != nil {
+				if data, err = r.Open(data); err != nil {
+					return r.fail(core.Errorf(core.CodeProviderError, err, "decrypt stream event"))
+				}
+			}
 			chunk, perr := r.event(data)
 			if perr != nil {
 				return r.fail(perr)

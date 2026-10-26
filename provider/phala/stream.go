@@ -37,6 +37,10 @@ func (p *Provider) Stream(ctx context.Context, req core.InferRequest) (core.Prov
 	}
 	st := &stream{ctx: ctx, p: p, ex: ex, model: req.Model}
 	st.rd = oai.NewReader(io.TeeReader(io.LimitReader(ex.resp.Body, maxBodyBytes+1), &st.raw))
+	if ex.enc != nil {
+		// raw keeps the encrypted wire bytes, which the receipt covers.
+		st.rd.Open = ex.enc.OpenChatEvent
+	}
 	return st, nil
 }
 
@@ -78,7 +82,7 @@ func (st *stream) Verify(ctx context.Context) (*core.Verification, error) {
 		return &v, nil
 	}
 	if !st.rd.Done() {
-		return nil, core.StreamUnfinished(core.Phala, st.model, route, st.rd.Err())
+		return nil, core.StreamUnfinished(st.p.id, st.model, st.p.route, st.rd.Err())
 	}
 	// With aci_verified the gateway never commits a stream early, so the
 	// header is expected; the completion id is the spec's fallback (§5.2).

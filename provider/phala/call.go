@@ -11,35 +11,59 @@ import (
 	"time"
 
 	"github.com/BOTChainLabs/private-ai-go/core"
+	"github.com/BOTChainLabs/private-ai-go/internal/e2ee"
 	"github.com/BOTChainLabs/private-ai-go/internal/oai"
 )
 
-// route names how a Phala result was served: through the attested ACI
-// gateway, to a verified TEE upstream.
-const route = "phala-aci"
-
-// exchange is one request sent over an attested session. reqBody holds the
-// exact bytes sent, which the receipt's request hash must match.
+// exchange is one request sent over an attested session. hashed holds the
+// request bytes the receipt's request hash must match: the exact bytes sent,
+// or with E2EE the request as the gateway serializes it after decrypting it.
 type exchange struct {
-	s       *session
-	reqBody []byte
-	resp    *http.Response
+	s      *session
+	hashed []byte
+	enc    *e2ee.Request // nil without E2EE
+	resp   *http.Response
 }
 
-// send serializes the request once, sends it over the session's pinned
-// client and checks the status. On success the caller owns resp.Body.
+// send sends the request over an attested session and checks the status. On
+// success the caller owns resp.Body. A request the gateway refused because
+// its E2EE key had rotated was never processed, so it is sent once more
+// under the re-established identity.
 func (p *Provider) send(ctx context.Context, req core.InferRequest, stream bool) (*exchange, error) {
+	ex, rotated, err := p.sendOnce(ctx, req, stream)
+	if rotated {
+		ex, _, err = p.sendOnce(ctx, req, stream)
+	}
+	return ex, err
+}
+
+// sendOnce serializes the request, sends it over the session's pinned client
+// and checks the status. rotated reports a refusal for a stale E2EE key.
+func (p *Provider) sendOnce(ctx context.Context, req core.InferRequest, stream bool) (ex *exchange, rotated bool, err error) {
 	s, err := p.session(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	reqBody, err := buildBody(req, stream)
 	if err != nil {
-		return nil, core.Errorf(core.CodeInvalidRequest, err, "encode request")
+		return nil, false, core.Errorf(core.CodeInvalidRequest, err, "encode request")
+	}
+	hashed := reqBody
+	var enc *e2ee.Request
+	if p.e2ee {
+		if enc, err = e2ee.New(s.id.E2EEKey, p.now()); err != nil {
+			return nil, false, core.Errorf(core.CodeAttestationFailed, err, "attested E2EE key")
+		}
+		if reqBody, hashed, err = enc.SealChat(reqBody); err != nil {
+			return nil, false, core.Errorf(core.CodeInvalidRequest, err, "encrypt request")
+		}
 	}
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.base.JoinPath("/v1/chat/completions").String(), bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	if enc != nil {
+		enc.SetHeaders(hreq.Header)
 	}
 	hreq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	hreq.Header.Set("Content-Type", "application/json")
@@ -57,9 +81,9 @@ func (p *Provider) send(ctx context.Context, req core.InferRequest, stream bool)
 	if err != nil {
 		if errors.Is(err, ErrTLSPinMismatch) {
 			p.invalidate()
-			return nil, core.Errorf(core.CodeTLSPinMismatch, err, "inference request")
+			return nil, false, core.Errorf(core.CodeTLSPinMismatch, err, "inference request")
 		}
-		return nil, core.Wrap(ctx, core.CodeProviderError, err, "inference request")
+		return nil, false, core.Wrap(ctx, core.CodeProviderError, err, "inference request")
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
@@ -68,21 +92,36 @@ func (p *Provider) send(ctx context.Context, req core.InferRequest, stream bool)
 		if resp.StatusCode == http.StatusServiceUnavailable && bytes.Contains(body, []byte("upstream_verification_failed")) {
 			code = core.CodeRouteNotTEE
 		}
-		return nil, core.Errorf(code, nil, "HTTP %d: %s", resp.StatusCode, truncate(body, 300))
+		// The gateway's E2EE key changed with its keyset: attest again.
+		if enc != nil && resp.StatusCode == http.StatusBadRequest && bytes.Contains(body, []byte("e2ee_model_key_mismatch")) {
+			p.invalidate()
+			rotated = true
+		}
+		return nil, rotated, core.Errorf(code, nil, "HTTP %d: %s", resp.StatusCode, truncate(body, 300))
 	}
 	// Headers are unauthenticated hints, but a changed keyset means the
 	// identity must be re-established before anything else is sent (§5.2).
 	if d := resp.Header.Get("X-ACI-Keyset-Digest"); d != "" && d != s.id.KeysetDigest {
 		p.invalidate()
 	}
-	return &exchange{s: s, reqBody: reqBody, resp: resp}, nil
+	// The answer would arrive in plaintext; decryption would fail anyway,
+	// but this names the cause.
+	if enc != nil && resp.Header.Get("X-E2EE-Applied") != "true" {
+		resp.Body.Close()
+		return nil, false, core.Errorf(core.CodeProviderError, nil, "the gateway did not encrypt its response (E2EE v%s)", e2ee.Version)
+	}
+	return &exchange{s: s, hashed: hashed, enc: enc, resp: resp}, false, nil
 }
 
 // verify fetches the receipt for a completed exchange and checks it against
 // the exact response bytes. It returns a Verified result or a *core.Error
 // carrying the verification details.
 func (p *Provider) verify(ctx context.Context, ex *exchange, receiptID, model string, respBody []byte) (core.Verification, error) {
-	ver := core.Verification{Status: core.Unverified, Provider: core.Phala, Model: model, Route: route}
+	ver := core.Verification{Status: core.Unverified, Provider: p.id, Model: model, Route: p.route}
+	if ex.enc != nil {
+		ver.Evidence.E2EE = e2ee.Algo
+	}
+	ver.Evidence.TLSPinned = len(ex.s.id.TLSPins) > 0
 	fail := func(status core.Status, code string, err error) (core.Verification, error) {
 		ver.Status = status
 		ver.Reasons = []string{err.Error()}
@@ -127,7 +166,7 @@ func (p *Provider) verify(ctx context.Context, ex *exchange, receiptID, model st
 		return fail(core.Unverified, core.CodeEvidenceUnavailable, errors.New("keyset expired before the receipt was verified"))
 	}
 
-	rr, err := VerifyReceipt(rawReceipt, vs.id, ex.reqBody, respBody)
+	rr, err := VerifyReceipt(rawReceipt, vs.id, ex.hashed, respBody)
 	if err != nil {
 		return fail(core.Failed, core.CodeReceiptInvalid, err)
 	}
@@ -137,7 +176,8 @@ func (p *Provider) verify(ctx context.Context, ex *exchange, receiptID, model st
 }
 
 // Infer sends one non-streaming chat completion and returns it only when its
-// receipt verifies against an attested identity.
+// receipt verifies against an attested identity. With E2EE, Raw is the
+// response with its generated content decrypted.
 func (p *Provider) Infer(ctx context.Context, req core.InferRequest) (*core.InferResult, error) {
 	ex, err := p.send(ctx, req, false)
 	if err != nil {
@@ -152,6 +192,12 @@ func (p *Provider) Infer(ctx context.Context, req core.InferRequest) (*core.Infe
 	ver, err := p.verify(ctx, ex, ex.resp.Header.Get("X-Receipt-Id"), req.Model, respBody)
 	if err != nil {
 		return nil, err
+	}
+	// The receipt covers the encrypted bytes, so decrypt only what verified.
+	if ex.enc != nil {
+		if respBody, err = ex.enc.OpenChat(respBody); err != nil {
+			return nil, core.Errorf(core.CodeProviderError, err, "decrypt response")
+		}
 	}
 	c, err := oai.ParseCompletion(respBody)
 	if err != nil {

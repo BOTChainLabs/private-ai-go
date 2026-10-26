@@ -6,6 +6,8 @@
 //	PHALA_API_KEY=... NEARAI_API_KEY=... go run ./examples/web
 //	open http://127.0.0.1:8080
 //
+// PHALA_E2EE=1 also encrypts Phala prompts and answers end to end.
+//
 // It listens on localhost. To serve other machines, pass -addr and set
 // DEMO_PASSWORD (HTTP basic auth, any user name): every message spends the
 // keys' credits.
@@ -92,7 +94,7 @@ func configFromEnv() privateai.Config {
 		if key == "" {
 			continue
 		}
-		cfg.Providers[p.id] = privateai.ProviderConfig{APIKey: key}
+		cfg.Providers[p.id] = privateai.ProviderConfig{APIKey: key, E2EE: p.id == privateai.Phala && os.Getenv("PHALA_E2EE") == "1"}
 		cfg.Models = append(cfg.Models, privateai.ModelEntry{Provider: p.id, Model: cmp.Or(os.Getenv(p.modelEnv), p.model)})
 	}
 	return cfg
@@ -171,7 +173,10 @@ var providers = map[privateai.ProviderID]providerInfo{
 		{"Approved code", func(e privateai.Evidence) string {
 			return "Phala's gateway app " + short(e.AppID) + ", on a pinned dstack OS build, with keys from Phala's KMS."
 		}},
-		{"Private channel", func(privateai.Evidence) string {
+		{"Private channel", func(e privateai.Evidence) string {
+			if e.E2EE != "" {
+				return "TLS is pinned to the key attested inside the TEE, and the prompt and answer are also encrypted end to end (E2EE v2) between this server and the TEE."
+			}
 			return "TLS is pinned to the key attested inside the TEE, so the prompt is decrypted only there."
 		}},
 		{"Model in a TEE", func(e privateai.Evidence) string {

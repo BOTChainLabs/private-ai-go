@@ -13,6 +13,9 @@ type ProviderID string
 const (
 	Phala ProviderID = "phala"
 	NEAR  ProviderID = "near"
+	// Gateway is a self-hosted gateway running Phala's open-source Private
+	// AI Gateway, verified against the identity its operator publishes.
+	Gateway ProviderID = "gateway"
 )
 
 // Status is the outcome of verifying one inference.
@@ -42,9 +45,10 @@ type InferRequest struct {
 	Messages []Message
 	// Params is copied into the request body as is (temperature, max_tokens,
 	// tools, ...). Keys the SDK controls (model, messages, stream, and for
-	// Phala provider) are overwritten. With NEAR, message content and tools
-	// are encrypted to the model; other parameters reach the gateway in
-	// plaintext.
+	// Phala and Gateway provider) are overwritten. With NEAR, message content
+	// and tools are encrypted to the model; other parameters reach the
+	// gateway in plaintext. With E2EE to a Phala or Gateway gateway, message
+	// content is encrypted; parameters travel over TLS only.
 	Params map[string]any
 }
 
@@ -91,6 +95,14 @@ type Evidence struct {
 	ReceiptID    string
 	SessionID    string // Phala: the attested upstream session
 	Receipt      json.RawMessage
+
+	// E2EE is the suite message content was encrypted with to the attested
+	// gateway (Phala and Gateway), empty when only TLS protected it.
+	E2EE string
+	// TLSPinned reports that the connection was pinned to a TLS key the
+	// attestation lists (Phala and Gateway). A Gateway whose TLS ends
+	// outside its TEE is reached over ordinary TLS, with content under E2EE.
+	TLSPinned bool
 }
 
 // ModelEntry names a model at a provider.

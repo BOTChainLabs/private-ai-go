@@ -1,6 +1,10 @@
 // Package phala verifies and calls Phala's confidential inference gateway
-// under the ACI spec (aci/1):
+// under the ACI spec (aci/1), optionally with E2EE v2:
 // https://github.com/Dstack-TEE/private-ai-gateway/blob/main/spec/aci.md
+//
+// Phala's gateway is the open-source Private AI Gateway, so the same
+// provider also verifies a self-hosted deployment of it (core.Gateway)
+// against that deployment's own workload identity.
 package phala
 
 import (
@@ -16,6 +20,7 @@ import (
 
 	"github.com/BOTChainLabs/private-ai-go/core"
 	"github.com/BOTChainLabs/private-ai-go/internal/canon"
+	"github.com/BOTChainLabs/private-ai-go/internal/e2ee"
 	"github.com/BOTChainLabs/private-ai-go/internal/tdx"
 )
 
@@ -46,7 +51,8 @@ type Report struct {
 		} `json:"evidence"`
 	} `json:"attestation"`
 	ServiceCapabilities struct {
-		Serving string `json:"serving"`
+		Serving               string   `json:"serving"`
+		SupportedE2EEVersions []string `json:"supported_e2ee_versions"`
 	} `json:"service_capabilities"`
 }
 
@@ -55,10 +61,13 @@ type Keyset struct {
 	Subject            *string    `json:"subject"`
 	NotAfter           int64      `json:"not_after"`
 	ReceiptSigningKeys []KeyEntry `json:"receipt_signing_keys"`
-	TLSPublicKeys      []TLSKey   `json:"tls_public_keys"`
+	// E2EEPublicKeys stay raw: a suite this SDK does not know may shape
+	// its entry differently, and must not break verification (spec §3.1).
+	E2EEPublicKeys []json.RawMessage `json:"e2ee_public_keys"`
+	TLSPublicKeys  []TLSKey          `json:"tls_public_keys"`
 }
 
-// KeyEntry is a receipt signing key in the keyset.
+// KeyEntry is a receipt signing or E2EE key in the keyset.
 type KeyEntry struct {
 	KeyID     string `json:"key_id"`
 	Algo      string `json:"algo"`
@@ -81,8 +90,12 @@ type Identity struct {
 	KeysetJSON json.RawMessage
 	NotAfter   time.Time
 	// TLSPins are the hex SHA-256 SPKI digests the keyset allows for the
-	// host. More than one can be listed while a TLS key rotates.
-	TLSPins     []string
+	// host. More than one can be listed while a TLS key rotates. Empty only
+	// with E2EE, when the gateway's TLS ends outside its TEE.
+	TLSPins []string
+	// E2EEKey is the attested X25519 key content is encrypted to, when the
+	// verifier requires E2EE.
+	E2EEKey     string
 	ComposeHash string
 	AppID       string
 	OSImageHash string
@@ -97,6 +110,13 @@ type Verifier struct {
 	Quote    QuoteVerifier
 	Workload Workload
 	Policy   core.Policy
+	// E2EE requires the service to terminate E2EE v2 with an attested X25519
+	// key.
+	E2EE bool
+	// UnpinnedTLS, with E2EE, accepts a keyset that lists no TLS key for the
+	// host: the service's TLS ends outside its TEE, and the E2EE key binds
+	// the channel instead (spec §9.2).
+	UnpinnedTLS bool
 }
 
 // KeysetDigest computes "sha256:" + hex(sha256(JCS(keyset))) (spec §3.1).
@@ -223,11 +243,30 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 			pins = append(pins, strings.ToLower(k.SPKISHA256))
 		}
 	}
-	if len(pins) == 0 {
+	if len(pins) == 0 && !(v.E2EE && v.UnpinnedTLS) {
 		return nil, fmt.Errorf("keyset lists no TLS key for %s", host)
 	}
 	if !slices.ContainsFunc(ks.ReceiptSigningKeys, func(k KeyEntry) bool { return k.Algo == "ed25519" }) {
 		return nil, fmt.Errorf("keyset has no ed25519 receipt signing key")
+	}
+	var e2eeKey string
+	if v.E2EE {
+		if !slices.Contains(rep.ServiceCapabilities.SupportedE2EEVersions, e2ee.Version) {
+			return nil, fmt.Errorf("service does not support E2EE v%s (supports %v)", e2ee.Version, rep.ServiceCapabilities.SupportedE2EEVersions)
+		}
+		for _, raw := range ks.E2EEPublicKeys {
+			var k KeyEntry
+			if json.Unmarshal(raw, &k) == nil && k.Algo == e2ee.Algo {
+				e2eeKey = k.PublicKey
+				break
+			}
+		}
+		if e2eeKey == "" {
+			return nil, fmt.Errorf("keyset has no %s key", e2ee.Algo)
+		}
+		if b, err := hex.DecodeString(strings.TrimPrefix(e2eeKey, "0x")); err != nil || len(b) != 32 {
+			return nil, fmt.Errorf("keyset %s key is malformed", e2ee.Algo)
+		}
 	}
 
 	id := &Identity{
@@ -236,6 +275,7 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 		KeysetJSON:   keysetJSON,
 		NotAfter:     notAfter,
 		TLSPins:      pins,
+		E2EEKey:      e2eeKey,
 		ComposeHash:  composeHash,
 		AppID:        events["app-id"],
 		OSImageHash:  events["os-image-hash"],

@@ -20,6 +20,7 @@ Requires Go 1.26 or later.
 | --- | --- | --- | --- |
 | Phala | `inference.phala.com` (ACI `aci/1`) | Intel TDX attestation, workload identity (dstack OS build, gateway app, KMS), TLS key pinning | Ed25519 receipt over the exact request and response bytes, attested upstream TEE session |
 | NEAR AI | `cloud-api.near.ai` | Intel TDX and NVIDIA GPU attestation, workload identity (dstack OS builds, gateway and model apps, KMS), TLS key pinning, request end-to-end encrypted to the model | Signature by the attested model over the exact bytes |
+| Gateway | Your deployment of the open-source [Private AI Gateway](https://github.com/Dstack-TEE/private-ai-gateway), the gateway Phala runs | As for Phala, against the identity you configure; content end-to-end encrypted to the gateway | As for Phala |
 
 You bring your own provider API key and the provider bills you directly. The SDK never stores or logs API keys, and prompts go straight to the provider.
 
@@ -108,6 +109,34 @@ privateai.NEAR: {
 },
 ```
 
+## End-to-end encryption
+
+Phala's gateway also terminates E2EE v2 ([spec](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/spec/e2ee-v2.md)). With `E2EE: true`, message content is encrypted to the gateway's attested key, and the answer comes back encrypted to a fresh key of each request:
+
+```go
+privateai.Phala: {APIKey: os.Getenv("PHALA_API_KEY"), E2EE: true},
+```
+
+The receipt still covers the request exactly: the SDK predicts the bytes the gateway hashes after decrypting it. Only content is encrypted: message content, and the answer's content and reasoning. Everything else travels over the pinned TLS channel only, including the API key, parameters such as `tools` and `response_format`, and tool calls, refusals and logprobs in the answer. `Evidence.E2EE` names the suite used. NEAR AI always uses its own E2EE.
+
+## Self-hosted gateway
+
+`privateai.Gateway` verifies someone else's deployment of the Private AI Gateway, such as the BotChain AI Gateway, against the identity its operator publishes:
+
+```go
+privateai.Gateway: {
+    APIKey:  os.Getenv("GATEWAY_API_KEY"),
+    BaseURL: "https://gateway.example.com",
+    Identity: &privateai.GatewayIdentity{
+        AppIDs: []string{"..."}, // the deployment's dstack app ID
+        OS:     []privateai.OSMeasurement{{MRTD: "...", RTMR0: "...", RTMR1: "...", RTMR2: "..."}},
+        // KeyProviders defaults to Phala Cloud's KMS.
+    },
+},
+```
+
+E2EE is always on. Hosted behind TLS that ends outside the TEE, such as Phala Cloud's ingress, the gateway's keyset lists no TLS key; the attested E2EE key then binds the channel, and whatever E2EE does not cover is protected by ordinary TLS only. `Evidence.TLSPinned` tells which case applied. Phala itself always requires the pinned TLS key. Pin the gateway's releases with `Policy.ComposeHashes` if you do not want to trust its operator's upgrades.
+
 ## What `Verified` records
 
 `res.Verification.Evidence` holds what the result was checked against: the provider app, OS image and compose hashes, the TCB status and the signed receipt or signature, ready to archive.
@@ -158,7 +187,7 @@ PHALA_API_KEY=... go test ./provider/phala -run LiveInference -v
 NEARAI_API_KEY=... go test ./provider/near -run Live -v
 ```
 
-The Phala verification is cross-checked against Phala's official TypeScript verifier with [tools/crosscheck](tools/crosscheck/README.md).
+The Phala verification is cross-checked against Phala's official TypeScript verifier with [tools/crosscheck](tools/crosscheck/README.md). E2EE is checked against the real gateway with [tools/gatewaycheck](tools/gatewaycheck/README.md) (`make interop`, Docker), and its JSON against Rust's serde_json with [tools/serdecheck](tools/serdecheck/README.md) (`make serdecheck`).
 
 ## License
 

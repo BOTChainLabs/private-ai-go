@@ -1,6 +1,6 @@
 # Private AI SDK for Go（中文说明）
 
-调用 TEE 机密推理的轻量 Go SDK，目前支持 Phala 和 NEAR AI。[English](README.md)
+调用 TEE 机密推理的轻量 Go SDK，目前支持 Phala、NEAR AI，以及自行部署的 Private AI Gateway。[English](README.md)
 
 ```bash
 go get github.com/BOTChainLabs/private-ai-go
@@ -111,6 +111,34 @@ privateai.NEAR: {
 
 NEAR 的 GPU 校验需要访问 NVIDIA 的证明服务（nras.attestation.nvidia.com），部署前请确认服务器能访问。
 
+## 端到端加密（E2EE）
+
+Phala 的网关支持 E2EE v2（[规范](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/spec/e2ee-v2.md)）。设置 `E2EE: true` 后，消息内容加密到网关已验证的公钥，回答用每次请求新生成的密钥加密返回：
+
+```go
+privateai.Phala: {APIKey: os.Getenv("PHALA_API_KEY"), E2EE: true},
+```
+
+Receipt 校验照常进行：网关解密后会重新序列化请求再计算哈希，SDK 能准确算出这份字节。加密的只是内容：消息内容，以及回答的内容和推理过程。其他部分只走已锁定的 TLS，包括 API Key、tools 和 response_format 等参数，以及回答里的工具调用、拒答说明和 logprobs。`Evidence.E2EE` 记录使用的加密套件。NEAR 始终使用它自己的 E2EE。
+
+## 自行部署的网关
+
+`privateai.Gateway` 用来校验别人部署的 Private AI Gateway（比如 BotChain AI Gateway），按运营方公布的身份校验：
+
+```go
+privateai.Gateway: {
+    APIKey:  os.Getenv("GATEWAY_API_KEY"),
+    BaseURL: "https://gateway.example.com",
+    Identity: &privateai.GatewayIdentity{
+        AppIDs: []string{"..."}, // 部署的 dstack 应用 ID
+        OS:     []privateai.OSMeasurement{{MRTD: "...", RTMR0: "...", RTMR1: "...", RTMR2: "..."}},
+        // KeyProviders 默认是 Phala Cloud 的 KMS
+    },
+},
+```
+
+Gateway 始终开启 E2EE。如果网关的 TLS 在 TEE 外终止（比如 Phala Cloud 的入口），密钥集里不会有 TLS 公钥，这时由已验证的 E2EE 公钥绑定通道，E2EE 不覆盖的部分只受普通 TLS 保护，`Evidence.TLSPinned` 会标明属于哪种情况。直连 Phala 时始终要求锁定 TLS 公钥。不想信任运营方的升级，可以用 `Policy.ComposeHashes` 锁定版本。
+
 ## 错误处理
 
 所有错误都可以用 `errors.As` 取出 `*privateai.Error`，按 `Code` 区分（常量如 `privateai.CodeAttestationFailed`）：
@@ -148,19 +176,23 @@ PHALA_API_KEY=... go test ./provider/phala -run LiveInference -v  # Phala 线上
 NEARAI_API_KEY=... go test ./provider/near -run Live -v          # NEAR 线上调用
 ```
 
-与 Phala 官方验证库的交叉验证见 [tools/crosscheck](tools/crosscheck/README.md)。
+与 Phala 官方验证库的交叉验证见 [tools/crosscheck](tools/crosscheck/README.md)。E2EE 与真实网关的联调见 [tools/gatewaycheck](tools/gatewaycheck/README.md)（`make interop`，需要 Docker），JSON 序列化与 Rust serde_json 的对比见 [tools/serdecheck](tools/serdecheck/README.md)（`make serdecheck`）。
 
 ## 目录结构
 
 ```
 privateai.go      对外入口：New、Infer、Stream、ListModels、Close
 core/             公共类型、错误码、Provider 接口
-provider/phala/   Phala：ACI 预检、TLS 绑定、Receipt 验签
+provider/phala/   Phala 和自建网关：ACI 预检、TLS 绑定、Receipt 验签、E2EE
 provider/near/    NEAR AI：封装官方 Go SDK
 internal/oai/     OpenAI 兼容的请求、响应和 SSE 解析
 internal/canon/   ACI 文档的规范化（JCS）
+internal/e2ee/    E2EE v2 客户端（X25519 + HKDF-SHA256 + AES-256-GCM）
+internal/serdejson/ 与网关（Rust serde_json）一致的 JSON 读写
 internal/tdx/     TDX Quote 解析、系统镜像和应用身份校验（两家共用）
 examples/demo/    命令行 Demo
 examples/web/     网页聊天 Demo
 tools/crosscheck/ 与 Phala 官方验证库的交叉验证
+tools/gatewaycheck/ 与真实网关的 E2EE 联调
+tools/serdecheck/ 与 Rust serde_json 的序列化对比
 ```

@@ -127,3 +127,64 @@ func TestExtraIdentityValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+var testGateway = GatewayIdentity{AppIDs: []string{extraApp}, OS: []OSMeasurement{extraOS}}
+
+func TestGatewayUsesItsOwnIdentity(t *testing.T) {
+	o, err := gatewayOptions(ProviderConfig{APIKey: "k", BaseURL: "https://gw.example", Identity: &testGateway, ExtraAppIDs: []string{strings.Repeat("22", 20)}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := o.Workload
+	if o.ID != Gateway || !o.E2EE {
+		t.Fatalf("options %+v", o)
+	}
+	if !slices.Equal(w.OS, []OSMeasurement{extraOS}) || !slices.Equal(w.AppIDs, []string{extraApp, strings.Repeat("22", 20)}) {
+		t.Fatalf("workload %+v", w)
+	}
+	// Phala's gateway app is never accepted for someone else's gateway; its
+	// KMS is the default key provider.
+	pw := phala.ProductionWorkload()
+	if slices.Contains(w.AppIDs, pw.AppIDs[0]) || !slices.Equal(w.KeyProviders, pw.KeyProviders) {
+		t.Fatalf("workload %+v", w)
+	}
+}
+
+func TestGatewayConfigValidation(t *testing.T) {
+	noOS := GatewayIdentity{AppIDs: testGateway.AppIDs}
+	badKMS := testGateway
+	badKMS.KeyProviders = []string{"not hex"}
+	cases := map[string]map[ProviderID]ProviderConfig{
+		"no identity":       {Gateway: {APIKey: "k", BaseURL: "https://gw.example"}},
+		"no base URL":       {Gateway: {APIKey: "k", Identity: &testGateway}},
+		"http base URL":     {Gateway: {APIKey: "k", BaseURL: "http://gw.example", Identity: &testGateway}},
+		"no OS":             {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &noOS}},
+		"bad key provider":  {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &badKMS}},
+		"identity on Phala": {Phala: {APIKey: "k", Identity: &testGateway}},
+	}
+	for name, providers := range cases {
+		t.Run(name, func(t *testing.T) {
+			var models []ModelEntry
+			for id := range providers {
+				models = append(models, ModelEntry{Provider: id, Model: "m"})
+			}
+			if _, err := New(Config{Providers: providers, Models: models}); err == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+	c, err := New(Config{
+		Providers: map[ProviderID]ProviderConfig{Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &testGateway}},
+		Models:    []ModelEntry{{Provider: Gateway, Model: "z-ai/glm-5.3"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+}
+
+func TestPhalaE2EEIsOptIn(t *testing.T) {
+	if phalaOptions(ProviderConfig{}, 0).E2EE || !phalaOptions(ProviderConfig{E2EE: true}, 0).E2EE {
+		t.Fatal("ProviderConfig.E2EE not passed to Phala")
+	}
+}
