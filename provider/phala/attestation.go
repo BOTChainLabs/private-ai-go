@@ -197,11 +197,14 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 
 	// Which code: the booted compose is bound by MRCONFIGID (set at launch,
 	// not changeable by the guest) and by the measured compose-hash event;
-	// the OS, app and key provider must be the expected workload.
+	// the OS, app and key provider must be the expected workload. Version 1
+	// is the compose hash itself; version 3 (dstack 0.6, apps with a key
+	// provider ID) hashes the compose with the app's identity, which comes
+	// from the event log, so it is checked once the log is replayed.
 	composeSum := sha256.Sum256([]byte(ev.AppCompose))
 	composeHash := hex.EncodeToString(composeSum[:])
-	wantConfig := append(append([]byte{0x01}, composeSum[:]...), make([]byte, 15)...)
-	if !bytes.Equal(q.MRConfigID, wantConfig) {
+	v3 := len(q.MRConfigID) == 48 && q.MRConfigID[0] == 0x03
+	if !v3 && !bytes.Equal(q.MRConfigID, mrConfigV1(composeSum)) {
 		return nil, fmt.Errorf("MRCONFIGID does not bind app_compose")
 	}
 	events, err := tdx.ReplayRTMR3([]byte(ev.EventLog), q.RTMR3)
@@ -210,6 +213,15 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 	}
 	if events["compose-hash"] != composeHash {
 		return nil, fmt.Errorf("measured compose-hash does not match app_compose")
+	}
+	if v3 {
+		ids, err := mrConfigV3IDs(ev.AppCompose, composeHash, events)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.ContainsFunc(ids, func(id []byte) bool { return bytes.Equal(id, q.MRConfigID) }) {
+			return nil, fmt.Errorf("MRCONFIGID v3 does not bind app_compose and the app's identity")
+		}
 	}
 	if err := v.checkWorkload(q, events); err != nil {
 		return nil, err

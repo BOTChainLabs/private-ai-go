@@ -55,6 +55,7 @@ type fakeGateway struct {
 	noTLSKey        bool              // keyset lists no TLS key (call rotate after)
 	futureSuite     bool              // keyset lists an E2EE suite of unknown shape first (call rotate after)
 	plainResponse   bool              // answers an E2EE request in plaintext
+	mrConfig        []byte            // the quote's MRCONFIGID; nil is version 1 of appCompose
 	lastWire        []byte            // the request body as received
 	receipt404      atomic.Int32
 	attestations    atomic.Int32
@@ -153,6 +154,10 @@ func (g *fakeGateway) quote(_ context.Context, hexQuote string) (QuoteResult, er
 	unhex := func(s string) []byte { b, _ := hex.DecodeString(s); return b }
 	os := fakeWorkload.OS[0]
 	compose := sha256.Sum256([]byte(g.appCompose))
+	mrConfig := g.mrConfig
+	if mrConfig == nil {
+		mrConfig = mrConfigV1(compose)
+	}
 	return QuoteResult{
 		TCBStatus:  "UpToDate",
 		ReportData: rd,
@@ -160,7 +165,7 @@ func (g *fakeGateway) quote(_ context.Context, hexQuote string) (QuoteResult, er
 		RTMR0:      unhex(os.RTMR0),
 		RTMR1:      unhex(os.RTMR1),
 		RTMR2:      unhex(os.RTMR2),
-		MRConfigID: append(append([]byte{0x01}, compose[:]...), make([]byte, 15)...),
+		MRConfigID: mrConfig,
 		RTMR3:      g.rtmr3,
 	}, nil
 }

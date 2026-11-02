@@ -8,6 +8,7 @@ All notable changes to this SDK are documented here.
 - Self-hosted gateways (`privateai.Gateway`): a deployment of the open-source Private AI Gateway, such as the BotChain AI Gateway, verified against its own identity (`ProviderConfig.Identity`), always with E2EE. Behind TLS that ends outside the TEE, the attested E2EE key binds the channel.
 - `Evidence.E2EE` records the suite content was encrypted with, and `Evidence.TLSPinned` whether the connection was pinned to an attested TLS key.
 - A gateway that rotated its E2EE key refuses the request unprocessed; the SDK re-attests and sends it once more.
+- dstack 0.6 launches (`privateai.Gateway` on Phala Cloud's dstack-0.6.1 image): MRCONFIGID version 3 is verified by rebuilding its document from the attested compose and event log. Version 1, which Phala's own gateway uses, is checked as before.
 - Interop and cross-check tools: `tools/gatewaycheck` runs E2EE against the real gateway; `tools/serdecheck` compares the SDK's JSON with serde_json.
 
 ## v0.1.0 (2026-10-22)
