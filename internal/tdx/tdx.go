@@ -120,7 +120,7 @@ type event struct {
 }
 
 // identityEvents are read from the log, so each must appear at most once.
-var identityEvents = []string{"app-id", "compose-hash", "key-provider", "mr-kms", "os-image-hash"}
+var identityEvents = []string{"app-id", "compose-hash", "gpu-policy-hash", "instance-id", "key-provider", "mr-kms", "os-image-hash"}
 
 // ReplayRTMR3 recomputes each dstack event's digest from its type, name and
 // payload, replays the computed digests, checks the result against rtmr3 and

@@ -128,14 +128,17 @@ privateai.Gateway: {
     APIKey:  os.Getenv("GATEWAY_API_KEY"),
     BaseURL: "https://gateway.example.com",
     Identity: &privateai.GatewayIdentity{
-        AppIDs: []string{"..."}, // the deployment's dstack app ID
-        OS:     []privateai.OSMeasurement{{MRTD: "...", RTMR0: "...", RTMR1: "...", RTMR2: "..."}},
+        AppIDs:        []string{"..."}, // the deployment's dstack app ID
+        OS:            []privateai.OSMeasurement{{MRTD: "...", RTMR0: "...", RTMR1: "...", RTMR2: "..."}},
+        ComposeHashes: []string{"..."}, // the releases the operator published
         // KeyProviders defaults to Phala Cloud's KMS.
     },
 },
 ```
 
-E2EE is always on. Hosted behind TLS that ends outside the TEE, such as Phala Cloud's ingress, the gateway's keyset lists no TLS key; the attested E2EE key then binds the channel, and whatever E2EE does not cover is protected by ordinary TLS only. `Evidence.TLSPinned` tells which case applied. Phala itself always requires the pinned TLS key. Pin the gateway's releases with `Policy.ComposeHashes` if you do not want to trust its operator's upgrades.
+E2EE is always on, and `ComposeHashes` is required: the operator can authorise a new compose for its app at any time, and only the pin keeps its releases to the ones you reviewed.
+
+The gateway's TLS must end inside its TEE, with its key in the attested keyset, as Phala's own gateway does. A gateway behind TLS that ends outside the TEE, such as Phala Cloud's ingress, lists no TLS key and is refused unless you set `AllowTLSOutsideTEE`. With it, E2EE keeps message content from the gateway's operator but not from whoever terminates TLS: E2EE v2 does not bind the client's key, so that party can resend a request with its own key within the replay window and read the answer. `Evidence.TLSPinned` tells which case applied.
 
 ## What `Verified` records
 

@@ -107,6 +107,21 @@ type GatewayIdentity struct {
 	KeyProviders []string
 	// KMSMeasurements optionally pin the KMS build (the mr-kms event).
 	KMSMeasurements []string
+	// ComposeHashes pin the gateway's releases: the SHA-256 of the
+	// app-compose of each release the operator publishes. Required: the
+	// operator can authorise a new compose for its app at any time, and the
+	// app ID, OS and KMS alone would accept it, whatever it does with
+	// plaintext.
+	ComposeHashes []string
+	// AllowTLSOutsideTEE accepts a gateway whose TLS ends outside its TEE,
+	// such as behind Phala Cloud's ingress, so that its keyset lists no TLS
+	// key. E2EE then keeps message content from the gateway's operator, but
+	// not from whoever terminates TLS: E2EE v2 does not bind the client's
+	// key, so that party can resend a request with its own key within the
+	// replay window and read the answer. Leave it false unless you trust the
+	// TLS terminator; a gateway that terminates TLS inside its TEE needs no
+	// such trust.
+	AllowTLSOutsideTEE bool
 }
 
 // Config lists the providers to enable and the models the client may call.
@@ -207,8 +222,16 @@ func gatewayOptions(pc ProviderConfig, timeout time.Duration) (phala.Options, er
 	if pc.BaseURL == "" {
 		return phala.Options{}, errors.New("BaseURL is required")
 	}
-	if len(g.AppIDs) == 0 || len(g.OS) == 0 {
-		return phala.Options{}, errors.New("Identity needs the gateway's AppIDs and OS builds")
+	if len(g.AppIDs) == 0 || len(g.OS) == 0 || len(g.ComposeHashes) == 0 {
+		return phala.Options{}, errors.New("Identity needs the gateway's AppIDs, OS builds and ComposeHashes")
+	}
+	for i, h := range g.ComposeHashes {
+		if b, err := hex.DecodeString(h); err != nil || len(b) != 32 {
+			return phala.Options{}, fmt.Errorf("Identity.ComposeHashes[%d] is not a SHA-256 in hex", i)
+		}
+	}
+	if len(pc.Policy.ComposeHashes) > 0 {
+		return phala.Options{}, errors.New("set the gateway's compose hashes in Identity.ComposeHashes, not Policy")
 	}
 	if err := checkIdentity(g.OS, "Identity.OS", g.AppIDs, "Identity.AppIDs"); err != nil {
 		return phala.Options{}, err
@@ -229,11 +252,11 @@ func gatewayOptions(pc ProviderConfig, timeout time.Duration) (phala.Options, er
 	if len(w.KeyProviders) == 0 {
 		w.KeyProviders = phala.ProductionWorkload().KeyProviders
 	}
-	// Hosted gateways commonly sit behind TLS that ends outside the TEE;
-	// E2EE then binds the content to the attested gateway.
+	policy := pc.Policy
+	policy.ComposeHashes = slices.Clone(g.ComposeHashes)
 	return phala.Options{
 		ID: Gateway, APIKey: pc.APIKey, BaseURL: pc.BaseURL, Timeout: timeout,
-		Policy: pc.Policy, Workload: &w, E2EE: true, UnpinnedTLS: true,
+		Policy: policy, Workload: &w, E2EE: true, UnpinnedTLS: g.AllowTLSOutsideTEE,
 	}, nil
 }
 

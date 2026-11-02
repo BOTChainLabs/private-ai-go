@@ -128,7 +128,7 @@ func TestExtraIdentityValidation(t *testing.T) {
 	}
 }
 
-var testGateway = GatewayIdentity{AppIDs: []string{extraApp}, OS: []OSMeasurement{extraOS}}
+var testGateway = GatewayIdentity{AppIDs: []string{extraApp}, OS: []OSMeasurement{extraOS}, ComposeHashes: []string{strings.Repeat("ab", 32)}}
 
 func TestGatewayUsesItsOwnIdentity(t *testing.T) {
 	o, err := gatewayOptions(ProviderConfig{APIKey: "k", BaseURL: "https://gw.example", Identity: &testGateway, ExtraAppIDs: []string{strings.Repeat("22", 20)}}, 0)
@@ -136,8 +136,15 @@ func TestGatewayUsesItsOwnIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := o.Workload
-	if o.ID != Gateway || !o.E2EE {
+	// The release is pinned, and TLS that ends outside the TEE is refused
+	// unless the caller accepts it.
+	if o.ID != Gateway || !o.E2EE || o.UnpinnedTLS || !slices.Equal(o.Policy.ComposeHashes, testGateway.ComposeHashes) {
 		t.Fatalf("options %+v", o)
+	}
+	outside := testGateway
+	outside.AllowTLSOutsideTEE = true
+	if o, err := gatewayOptions(ProviderConfig{APIKey: "k", BaseURL: "https://gw.example", Identity: &outside}, 0); err != nil || !o.UnpinnedTLS {
+		t.Fatalf("TLS outside the TEE: %+v, %v", o, err)
 	}
 	if !slices.Equal(w.OS, []OSMeasurement{extraOS}) || !slices.Equal(w.AppIDs, []string{extraApp, strings.Repeat("22", 20)}) {
 		t.Fatalf("workload %+v", w)
@@ -151,7 +158,10 @@ func TestGatewayUsesItsOwnIdentity(t *testing.T) {
 }
 
 func TestGatewayConfigValidation(t *testing.T) {
-	noOS := GatewayIdentity{AppIDs: testGateway.AppIDs}
+	noOS := GatewayIdentity{AppIDs: testGateway.AppIDs, ComposeHashes: testGateway.ComposeHashes}
+	noCompose := GatewayIdentity{AppIDs: testGateway.AppIDs, OS: testGateway.OS}
+	badCompose := testGateway
+	badCompose.ComposeHashes = []string{"abcd"}
 	badKMS := testGateway
 	badKMS.KeyProviders = []string{"not hex"}
 	cases := map[string]map[ProviderID]ProviderConfig{
@@ -159,6 +169,9 @@ func TestGatewayConfigValidation(t *testing.T) {
 		"no base URL":       {Gateway: {APIKey: "k", Identity: &testGateway}},
 		"http base URL":     {Gateway: {APIKey: "k", BaseURL: "http://gw.example", Identity: &testGateway}},
 		"no OS":             {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &noOS}},
+		"no compose pin":    {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &noCompose}},
+		"bad compose pin":   {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &badCompose}},
+		"compose in Policy": {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &testGateway, Policy: Policy{ComposeHashes: testGateway.ComposeHashes}}},
 		"bad key provider":  {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &badKMS}},
 		"identity on Phala": {Phala: {APIKey: "k", Identity: &testGateway}},
 	}
