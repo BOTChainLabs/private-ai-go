@@ -24,7 +24,7 @@ docker compose -f tools/gatewaycheck/compose.yaml down
 The gateway reaches the mock at `host.docker.internal:18087`; set
 `PRIVATEAI_GATEWAY_MOCK_ADDR` to listen elsewhere.
 
-Last run 2026-10-26, gateway commit 22d08e24: buffered and streaming both
-pass, with messages that include HTML, U+2028, control characters, emoji,
+Last run 2026-11-05, gateway commit 77fac126 (and 2026-10-26, 22d08e24):
+buffered and streaming both pass, with messages that include HTML, U+2028, control characters, emoji,
 array-like text, empty content and 10 KB of text, and float, large integer
 and nested parameters.
