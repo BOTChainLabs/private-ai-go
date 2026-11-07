@@ -149,11 +149,16 @@ func TestGatewayUsesItsOwnIdentity(t *testing.T) {
 	if !slices.Equal(w.OS, []OSMeasurement{extraOS}) || !slices.Equal(w.AppIDs, []string{extraApp, strings.Repeat("22", 20)}) {
 		t.Fatalf("workload %+v", w)
 	}
-	// Phala's gateway app is never accepted for someone else's gateway; its
-	// KMS is the default key provider.
-	pw := phala.ProductionWorkload()
-	if slices.Contains(w.AppIDs, pw.AppIDs[0]) || !slices.Equal(w.KeyProviders, pw.KeyProviders) {
-		t.Fatalf("workload %+v", w)
+	// Phala's gateway apps are never accepted for someone else's gateway, and
+	// the default key provider is Phala Cloud's KMS alone, not the KMS of
+	// Phala's own gateway.
+	for _, app := range phala.ProductionWorkload().AppIDs {
+		if slices.Contains(w.AppIDs, app) {
+			t.Fatalf("Phala's app %s accepted for a self-hosted gateway", app)
+		}
+	}
+	if !slices.Equal(w.KeyProviders, phala.CloudKeyProviders()) || len(w.KeyProviders) != 1 {
+		t.Fatalf("key providers %v", w.KeyProviders)
 	}
 }
 

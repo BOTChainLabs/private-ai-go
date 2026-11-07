@@ -11,6 +11,8 @@ All notable changes to this SDK are documented here.
 - The `instance-id` and `gpu-policy-hash` events, now read for MRCONFIGID version 3, must appear at most once in the event log, like the other identity events.
 - dstack 0.6 launches (`privateai.Gateway` on Phala Cloud's dstack-0.6.1 image): MRCONFIGID version 3 is verified by rebuilding its document from the attested compose and event log. Version 1, which Phala's own gateway uses, is checked as before.
 - Interop and cross-check tools: `tools/gatewaycheck` runs E2EE against the real gateway; `tools/serdecheck` compares the SDK's JSON with serde_json.
+- Phala's gateway moved on 2026-11-06 to a new app (`89c51ab8…`), KMS and dstack OS 0.5.12; `phala.ProductionWorkload` accepts it beside the old deployment, which v0.1.0 alone accepts, so v0.1.0 fails to verify `inference.phala.com`.
+- Self-hosted gateways default to Phala Cloud's KMS (`phala.CloudKeyProviders`), not to every KMS of Phala's own gateway.
 
 ## v0.1.0 (2026-10-22)
 

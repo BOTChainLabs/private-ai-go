@@ -250,7 +250,7 @@ func gatewayOptions(pc ProviderConfig, timeout time.Duration) (phala.Options, er
 		KMSMeasurements: slices.Clone(g.KMSMeasurements),
 	}
 	if len(w.KeyProviders) == 0 {
-		w.KeyProviders = phala.ProductionWorkload().KeyProviders
+		w.KeyProviders = phala.CloudKeyProviders()
 	}
 	policy := pc.Policy
 	policy.ComposeHashes = slices.Clone(g.ComposeHashes)
