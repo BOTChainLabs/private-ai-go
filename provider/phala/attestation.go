@@ -312,10 +312,24 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 // errors carry the observed values, so a new release is easy to recognize.
 func (v *Verifier) checkWorkload(q QuoteResult, events map[string]string) error {
 	w := v.Workload
-	if err := tdx.CheckOS(q.measurements(), w.OS); err != nil {
+	m := q.measurements()
+	if err := tdx.CheckOS(m, w.OS); err != nil {
 		return err
 	}
-	return tdx.App{AppIDs: w.AppIDs, KeyProviders: w.KeyProviders, KMSMeasurements: w.KMSMeasurements}.Check(events)
+	if err := (tdx.App{AppIDs: w.AppIDs, KeyProviders: w.KeyProviders, KMSMeasurements: w.KMSMeasurements}).Check(events); err != nil {
+		return err
+	}
+	if len(w.Deployments) == 0 {
+		return nil
+	}
+	for _, d := range w.Deployments {
+		if d.complete() && tdx.CheckOS(m, d.OS) == nil && (tdx.App{AppIDs: d.AppIDs, KeyProviders: d.KeyProviders}).Check(events) == nil {
+			return nil
+		}
+	}
+	os := tdx.OSOf(m)
+	return fmt.Errorf("app %s with key provider %s on OS build MRTD %s RTMR0 %s RTMR1 %s RTMR2 %s is not an accepted deployment",
+		events["app-id"], events["key-provider"], os.MRTD, os.RTMR0, os.RTMR1, os.RTMR2)
 }
 
 // keysetMembers is the fixed keyset shape (spec §3.1, Appendix B).

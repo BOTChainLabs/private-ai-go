@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"os"
 	"strings"
 	"testing"
@@ -32,11 +33,31 @@ func loadReport(t *testing.T, name string) *Report {
 
 func reportNonce(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile("testdata/attestation-nonce.txt")
+	return nonceFile(t, "attestation-nonce.txt")
+}
+
+func nonceFile(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile("testdata/" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// measured reads a genuine report's quote and replays its event log.
+func measured(t *testing.T, r *Report) (QuoteResult, map[string]string) {
+	t.Helper()
+	raw, _ := hex.DecodeString(r.Attestation.Evidence.Quote)
+	q, err := parseTDReport(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := tdx.ReplayRTMR3([]byte(r.Attestation.Evidence.EventLog), q.RTMR3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return q, events
 }
 
 // offlineQuote reads the measurements from the real quote bytes without
@@ -110,6 +131,81 @@ func TestProductionWorkloadAcceptsBothReleases(t *testing.T) {
 	}
 	if err := productionVerifier().checkWorkload(q, events); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The gateway Phala runs since 2026-11-06, captured on 2026-11-11 with its
+// nonce: app 89c51ab8 on the dstack KMS on Base, on dstack OS 0.5.12.
+func TestVerifyRealReportBaseKMS(t *testing.T) {
+	r := loadReport(t, "attestation-2026-11-11.json")
+	at := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
+	id, err := productionVerifier().VerifyReport(context.Background(), r, nonceFile(t, "attestation-2026-11-11-nonce.txt"), "inference.phala.com", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.AppID != "89c51ab856bee41efe78c40309a4deb277a02a0f" ||
+		id.ComposeHash != "66e91ac6c2325537851bc95fc0e4489df119b7b0204d27f2bae91ec1324ecf1f" || len(id.TLSPins) == 0 {
+		t.Fatalf("identity %+v", id)
+	}
+}
+
+// Each of Phala's deployments is accepted only as a whole: its app with its
+// own KMS and OS build. The values of the two do not mix.
+func TestProductionWorkloadBindsDeployments(t *testing.T) {
+	oldQ, oldEv := measured(t, loadReport(t, "attestation-nonce.json"))      // fdb7a14e, Phala Cloud's KMS, OS 0.5
+	newQ, newEv := measured(t, loadReport(t, "attestation-2026-11-11.json")) // 89c51ab8, the Base KMS, OS 0.5.12
+	v := productionVerifier()
+	for name, c := range map[string]struct {
+		q  QuoteResult
+		ev map[string]string
+	}{"old deployment": {oldQ, oldEv}, "new deployment": {newQ, newEv}} {
+		if err := v.checkWorkload(c.q, c.ev); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	with := func(ev map[string]string, kv ...string) map[string]string {
+		out := maps.Clone(ev)
+		for i := 0; i < len(kv); i += 2 {
+			out[kv[i]] = kv[i+1]
+		}
+		return out
+	}
+	app, kms := "app-id", "key-provider"
+	cases := []struct {
+		name string
+		q    QuoteResult
+		ev   map[string]string
+	}{
+		{"new app on Phala Cloud's KMS", newQ, with(newEv, kms, oldEv[kms])},
+		{"old app on the Base KMS", oldQ, with(oldEv, kms, newEv[kms])},
+		{"new app and KMS on the old OS", oldQ, with(oldEv, app, newEv[app], kms, newEv[kms])},
+		{"old app and KMS on the new OS", newQ, with(newEv, app, oldEv[app], kms, oldEv[kms])},
+		{"new app on the old OS and KMS", oldQ, with(oldEv, app, newEv[app])},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := v.checkWorkload(c.q, c.ev)
+			if err == nil || !strings.Contains(err.Error(), "not an accepted deployment") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+// A deployment with an empty field would accept anything there: it never
+// matches, and New refuses it.
+func TestIncompleteDeploymentNeverMatches(t *testing.T) {
+	q, ev := measured(t, loadReport(t, "attestation-nonce.json"))
+	w := ProductionWorkload()
+	for i := range w.Deployments {
+		w.Deployments[i].KeyProviders = nil
+	}
+	v := &Verifier{Quote: offlineQuote("UpToDate"), Workload: w}
+	if err := v.checkWorkload(q, ev); err == nil {
+		t.Fatal("a deployment without key providers matched")
+	}
+	if _, err := New(Options{APIKey: "k", Workload: &w}); err == nil {
+		t.Fatal("New accepted a deployment without key providers")
 	}
 }
 

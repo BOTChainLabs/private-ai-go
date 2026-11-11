@@ -115,6 +115,13 @@ func New(o Options) (*Provider, error) {
 	if w := o.Workload; id != core.Phala && (w == nil || len(w.OS) == 0 || len(w.AppIDs) == 0 || len(w.KeyProviders) == 0) {
 		return nil, fmt.Errorf("%s: the gateway's OS builds, app IDs and key providers are required", id)
 	}
+	if w := o.Workload; w != nil {
+		for i, d := range w.Deployments {
+			if !d.complete() {
+				return nil, fmt.Errorf("%s: workload deployment %d needs its app IDs, key providers and OS builds", id, i)
+			}
+		}
+	}
 	if o.UnpinnedTLS && !o.E2EE {
 		return nil, fmt.Errorf("%s: UnpinnedTLS requires E2EE", id)
 	}

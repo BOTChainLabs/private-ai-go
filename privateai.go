@@ -85,9 +85,12 @@ type ProviderConfig struct {
 	// ExtraOSBuilds and ExtraAppIDs add to the provider's built-in identity
 	// what this SDK version does not know yet: a provider OS upgrade, or a
 	// NEAR AI model served as its own app (ExtraAppIDs extends NEAR's model
-	// apps and Phala's gateway app). Verification refuses an unknown build
-	// or app and names it in the error; add it here only once the provider
-	// has confirmed it.
+	// apps and Phala's gateway app). For Phala, each built-in deployment
+	// keeps its own KMS: an extra OS build may run any of them, and an extra
+	// app is accepted with the KMS and OS builds of any of them. For a
+	// Gateway they extend Identity. Verification refuses an unknown build or
+	// app and names it in the error; add it here only once the provider has
+	// confirmed it.
 	ExtraOSBuilds []OSMeasurement
 	ExtraAppIDs   []string
 }
@@ -215,6 +218,13 @@ func phalaOptions(pc ProviderConfig, timeout time.Duration) phala.Options {
 	w := phala.ProductionWorkload()
 	w.OS = append(w.OS, pc.ExtraOSBuilds...)
 	w.AppIDs = append(w.AppIDs, pc.ExtraAppIDs...)
+	// Phala's deployments stay bound to their own KMS: an extra OS build may
+	// run either deployment, and an extra app may take the place of either
+	// deployment's app, with that deployment's KMS and OS builds.
+	for i, d := range w.Deployments {
+		w.Deployments[i].OS = append(slices.Clip(d.OS), pc.ExtraOSBuilds...)
+		w.Deployments[i].AppIDs = append(slices.Clip(d.AppIDs), pc.ExtraAppIDs...)
+	}
 	return phala.Options{APIKey: pc.APIKey, BaseURL: pc.BaseURL, Timeout: timeout, Policy: pc.Policy, Workload: &w, E2EE: pc.E2EE}
 }
 

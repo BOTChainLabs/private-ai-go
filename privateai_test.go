@@ -94,8 +94,18 @@ func TestExtraIdentityExtendsBuiltIn(t *testing.T) {
 	if !slices.Equal(n.Gateway.AppIDs, nw.Gateway.AppIDs) {
 		t.Fatal("an extra app ID was accepted as NEAR's gateway")
 	}
+	// Phala's deployments keep their own KMS: the extras join each of them.
+	if len(p.Deployments) != len(pw.Deployments) {
+		t.Fatalf("deployments %+v", p.Deployments)
+	}
+	for i, d := range p.Deployments {
+		b := pw.Deployments[i]
+		if !slices.Equal(d.OS, append(b.OS, extraOS)) || !slices.Equal(d.AppIDs, append(b.AppIDs, extraApp)) || !slices.Equal(d.KeyProviders, b.KeyProviders) {
+			t.Fatalf("deployment %d: %+v", i, d)
+		}
+	}
 	// Without extras, the built-in identity is used unchanged.
-	if !slices.Equal(phalaOptions(ProviderConfig{}, 0).Workload.OS, pw.OS) {
+	if w := phalaOptions(ProviderConfig{}, 0).Workload; !slices.Equal(w.OS, pw.OS) || !slices.Equal(w.Deployments[0].OS, pw.Deployments[0].OS) {
 		t.Fatal("phala OS builds changed without extras")
 	}
 }
