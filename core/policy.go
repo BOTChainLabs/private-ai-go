@@ -21,7 +21,8 @@ type Policy struct {
 	AcceptedTCBStatuses []string
 	// ComposeHashes, when set, accepts only deployments whose measured
 	// app-compose hash (hex) is listed. Empty accepts any compose the
-	// provider's identity checks allow.
+	// provider's identity checks allow. A self-hosted gateway pins its
+	// releases in GatewayIdentity.ComposeHashes instead, and refuses this.
 	ComposeHashes []string
 }
 

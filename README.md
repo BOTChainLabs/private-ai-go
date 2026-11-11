@@ -101,7 +101,7 @@ privateai.Phala: {
 },
 ```
 
-The production identities of Phala and NEAR AI (OS builds, apps, KMS) are built in. Providers' regular releases need no change. When a provider upgrades its OS, or NEAR AI serves a model as a new app, verification fails safely and the error shows the new values. Once the provider confirms them, add them until an SDK release includes them:
+The production identities of Phala and NEAR AI (OS builds, apps, KMS) are built in; each of Phala's deployments is accepted only with its own app, KMS and OS build. Providers' regular releases need no change. When a provider upgrades its OS, or NEAR AI serves a model as a new app, verification fails safely and the error shows the new values. Once the provider confirms them, add them until an SDK release includes them:
 
 ```go
 privateai.NEAR: {

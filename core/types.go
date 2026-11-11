@@ -22,8 +22,9 @@ const (
 type Status string
 
 const (
-	// Verified means every check passed: attestation, channel binding,
-	// response signature and route.
+	// Verified means every check passed: attestation, the binding of the
+	// request to attested keys (a pinned TLS key, end-to-end encryption, or
+	// both), the response signature and the route.
 	Verified Status = "Verified"
 	// Failed means evidence was present but did not check out.
 	Failed Status = "Failed"
