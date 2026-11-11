@@ -35,8 +35,11 @@ type Options struct {
 	ID      core.ProviderID
 	APIKey  string
 	BaseURL string // defaults to DefaultBaseURL for Phala
-	// Timeout bounds non-streaming calls and the preflight. Streams are
-	// bounded only by the caller's context.
+	// Timeout bounds each non-streaming call as a whole: the preflight,
+	// sending, reading the answer and verifying its receipt, with any
+	// re-attestation. For a stream it bounds opening it, until the response
+	// headers arrive, and Verify; reading the stream is bounded only by the
+	// caller's context. It also bounds each preflight. Zero means 2 minutes.
 	Timeout time.Duration
 	// Workload is the gateway code to accept. Nil means ProductionWorkload,
 	// which matches inference.phala.com.

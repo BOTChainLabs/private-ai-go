@@ -28,21 +28,22 @@ type exchange struct {
 // send sends the request over an attested session and checks the status. On
 // success the caller owns resp.Body. A request the gateway refused because
 // its E2EE key had rotated was never processed, so it is sent once more
-// under the re-established identity.
-func (p *Provider) send(ctx context.Context, req core.InferRequest, stream bool) (*exchange, error) {
-	ex, rotated, err := p.sendOnce(ctx, req, stream)
+// under the re-established identity. ctx bounds the call; caller is the
+// caller's own context, whose end is reported as is.
+func (p *Provider) send(ctx, caller context.Context, req core.InferRequest, stream bool) (*exchange, error) {
+	ex, rotated, err := p.sendOnce(ctx, caller, req, stream)
 	if rotated {
-		ex, _, err = p.sendOnce(ctx, req, stream)
+		ex, _, err = p.sendOnce(ctx, caller, req, stream)
 	}
 	return ex, err
 }
 
 // sendOnce serializes the request, sends it over the session's pinned client
 // and checks the status. rotated reports a refusal for a stale E2EE key.
-func (p *Provider) sendOnce(ctx context.Context, req core.InferRequest, stream bool) (ex *exchange, rotated bool, err error) {
+func (p *Provider) sendOnce(ctx, caller context.Context, req core.InferRequest, stream bool) (ex *exchange, rotated bool, err error) {
 	s, err := p.session(ctx)
 	if err != nil {
-		return nil, false, err
+		return nil, false, stopped(caller, core.CodeEvidenceUnavailable, err, "attest")
 	}
 	reqBody, err := buildBody(req, stream)
 	if err != nil {
@@ -83,7 +84,7 @@ func (p *Provider) sendOnce(ctx context.Context, req core.InferRequest, stream b
 			p.invalidate()
 			return nil, false, core.Errorf(core.CodeTLSPinMismatch, err, "inference request")
 		}
-		return nil, false, core.Wrap(ctx, core.CodeProviderError, err, "inference request")
+		return nil, false, core.Wrap(caller, core.CodeProviderError, err, "inference request")
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
@@ -115,8 +116,9 @@ func (p *Provider) sendOnce(ctx context.Context, req core.InferRequest, stream b
 
 // verify fetches the receipt for a completed exchange and checks it against
 // the exact response bytes. It returns a Verified result or a *core.Error
-// carrying the verification details.
-func (p *Provider) verify(ctx context.Context, ex *exchange, receiptID, model string, respBody []byte) (core.Verification, error) {
+// carrying the verification details. ctx bounds the verification; when the
+// caller's own context ends, its error is returned as is.
+func (p *Provider) verify(ctx, caller context.Context, ex *exchange, receiptID, model string, respBody []byte) (core.Verification, error) {
 	ver := core.Verification{Status: core.Unverified, Provider: p.id, Model: model, Route: p.route}
 	if ex.enc != nil {
 		ver.Evidence.E2EE = e2ee.Algo
@@ -134,7 +136,7 @@ func (p *Provider) verify(ctx context.Context, ex *exchange, receiptID, model st
 	}
 	ver.Evidence.ReceiptID = receiptID
 	rawReceipt, err := p.fetchReceipt(ctx, ex.s.client, receiptID)
-	if err != nil && ctx.Err() != nil {
+	if err != nil && caller.Err() != nil {
 		return ver, err // the caller gave up
 	}
 	if err != nil {
@@ -156,6 +158,9 @@ func (p *Provider) verify(ctx context.Context, ex *exchange, receiptID, model st
 	vs := ex.s
 	if named.Digest != vs.id.KeysetDigest {
 		if vs, err = p.sessionFor(ctx, named.Digest); err != nil {
+			if caller.Err() != nil {
+				return ver, err
+			}
 			return fail(core.Unverified, core.CodeEvidenceUnavailable, err)
 		}
 	}
@@ -180,9 +185,12 @@ func (p *Provider) verify(ctx context.Context, ex *exchange, receiptID, model st
 
 // Infer sends one non-streaming chat completion and returns it only when its
 // receipt verifies against an attested identity. With E2EE, Raw is the
-// response with its generated content decrypted.
+// response with its generated content decrypted. Options.Timeout bounds the
+// whole call: the preflight, sending, reading the answer and verifying it.
 func (p *Provider) Infer(ctx context.Context, req core.InferRequest) (*core.InferResult, error) {
-	ex, err := p.send(ctx, req, false)
+	callCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	ex, err := p.send(callCtx, ctx, req, false)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +200,7 @@ func (p *Provider) Infer(ctx context.Context, req core.InferRequest) (*core.Infe
 		return nil, core.Wrap(ctx, core.CodeProviderError, err, "read inference response")
 	}
 
-	ver, err := p.verify(ctx, ex, ex.resp.Header.Get("X-Receipt-Id"), req.Model, respBody)
+	ver, err := p.verify(callCtx, ctx, ex, ex.resp.Header.Get("X-Receipt-Id"), req.Model, respBody)
 	if err != nil {
 		return nil, err
 	}
@@ -256,6 +264,17 @@ func buildBody(req core.InferRequest, stream bool) ([]byte, error) {
 	body := oai.Body(req, stream)
 	body["provider"] = map[string]any{"aci_verified": true}
 	return json.Marshal(body)
+}
+
+// stopped gives an error that ended a step an SDK code. A *core.Error and
+// the caller's own cancellation are returned as they are; anything else,
+// such as the call's timeout, gets code.
+func stopped(caller context.Context, code string, err error, msg string) error {
+	var ce *core.Error
+	if errors.As(err, &ce) {
+		return err
+	}
+	return core.Wrap(caller, code, err, msg)
 }
 
 func truncate(b []byte, n int) string {

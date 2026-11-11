@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/BOTChainLabs/private-ai-go/core"
 	"github.com/BOTChainLabs/private-ai-go/internal/oai"
@@ -16,10 +17,11 @@ import (
 // the receipt hashes "the raw in-order stream including framing" (§7.4), so
 // verification needs the wire bytes, not the parsed events.
 type stream struct {
-	ctx   context.Context // the request's context
-	p     *Provider
-	ex    *exchange
-	model string
+	ctx    context.Context // the caller's context
+	cancel func()          // ends the request's context
+	p      *Provider
+	ex     *exchange
+	model  string
 
 	raw bytes.Buffer // exact bytes received so far
 	rd  *oai.Reader
@@ -30,12 +32,33 @@ type stream struct {
 
 // Stream sends a streaming chat completion. The returned content is not
 // trustworthy until the stream is read to io.EOF and Verify succeeds.
+//
+// Options.Timeout bounds opening the stream, until the response headers
+// arrive, and Verify. Reading the stream is bounded by ctx alone, since an
+// answer can take long to generate.
 func (p *Provider) Stream(ctx context.Context, req core.InferRequest) (core.ProviderStream, error) {
-	ex, err := p.send(ctx, req, true)
+	// The request's context must outlive the opening, so the timeout cancels
+	// it only while the stream is opening.
+	rctx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(p.timeout, cancel)
+	ex, err := p.send(rctx, ctx, req, true)
+	if fired := !timer.Stop(); fired && ctx.Err() == nil {
+		if err == nil {
+			ex.resp.Body.Close()
+		}
+		cancel()
+		code := core.CodeProviderError
+		var ce *core.Error
+		if errors.As(err, &ce) {
+			code = ce.Code
+		}
+		return nil, core.Errorf(code, err, "the stream did not open within %s", p.timeout)
+	}
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-	st := &stream{ctx: ctx, p: p, ex: ex, model: req.Model}
+	st := &stream{ctx: ctx, cancel: cancel, p: p, ex: ex, model: req.Model}
 	st.rd = oai.NewReader(io.TeeReader(io.LimitReader(ex.resp.Body, maxBodyBytes+1), &st.raw))
 	if ex.enc != nil {
 		// raw keeps the encrypted wire bytes, which the receipt covers.
@@ -90,7 +113,9 @@ func (st *stream) Verify(ctx context.Context) (*core.Verification, error) {
 	if receiptID == "" {
 		receiptID = st.rd.ID
 	}
-	ver, err := st.p.verify(ctx, st.ex, receiptID, st.model, st.raw.Bytes())
+	vctx, cancel := context.WithTimeout(ctx, st.p.timeout)
+	defer cancel()
+	ver, err := st.p.verify(vctx, ctx, st.ex, receiptID, st.model, st.raw.Bytes())
 	if err != nil {
 		return nil, err
 	}
@@ -103,6 +128,9 @@ func (st *stream) Usage() core.Usage { return st.rd.Usage }
 
 func (st *stream) Close() error {
 	var err error
-	st.closeOnce.Do(func() { err = st.ex.resp.Body.Close() })
+	st.closeOnce.Do(func() {
+		err = st.ex.resp.Body.Close()
+		st.cancel()
+	})
 	return err
 }

@@ -131,8 +131,12 @@ type Config struct {
 	Providers map[ProviderID]ProviderConfig
 	// Models lists the only models the client may call.
 	Models []ModelEntry
-	// Timeout bounds each non-streaming call, including its verification.
-	// Zero means 2 minutes. Streams are bounded by the caller's context.
+	// Timeout bounds each non-streaming call as a whole, including its
+	// attestation and verification. For a stream it bounds opening it, until
+	// the provider starts answering, and Stream.Verify; reading the stream
+	// is bounded only by the caller's context, since an answer can take long
+	// to generate. A NEAR stream is one verified non-streaming call, bounded
+	// as a whole. Zero means 2 minutes.
 	Timeout time.Duration
 }
 

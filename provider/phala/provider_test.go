@@ -53,6 +53,9 @@ type fakeGateway struct {
 	streamError     bool
 	receiptDigest   string             // overrides the digest the receipt names
 	receiptSigner   ed25519.PrivateKey // signs receipts instead of the current key
+	receiptDelay    time.Duration      // the receipt endpoint stalls this long
+	chatDelay       time.Duration      // the chat endpoint stalls this long before answering
+	partDelay       time.Duration      // pause between the parts of an answer
 	e2ee            *e2eetest.Service  // terminates E2EE v2 when set (call rotate after)
 	noTLSKey        bool               // keyset lists no TLS key (call rotate after)
 	futureSuite     bool               // keyset lists an E2EE suite of unknown shape first (call rotate after)
@@ -254,6 +257,9 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 		g.chats.Add(1)
+		if !pause(r, g.chatDelay) {
+			return
+		}
 		wire, _ := io.ReadAll(r.Body)
 		body := wire
 		var x *e2eetest.Exchange
@@ -286,7 +292,10 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		if !g.noReceiptHeader {
 			w.Header().Set("X-Receipt-Id", "rcpt-1")
 		}
-		for _, part := range parts {
+		for i, part := range parts {
+			if i > 0 && !pause(r, g.partDelay) {
+				return
+			}
 			if g.tamperResponse {
 				part = bytes.Replace(part, []byte("hello"), []byte("HELLO"), 1)
 			}
@@ -297,6 +306,9 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case r.Method == http.MethodGet && (r.URL.Path == "/v1/aci/receipts/rcpt-1" || r.URL.Path == "/v1/aci/receipts/chatcmpl-1"):
+		if !pause(r, g.receiptDelay) {
+			return
+		}
 		if g.receipt404.Load() > 0 {
 			g.receipt404.Add(-1)
 			http.NotFound(w, r)
@@ -330,6 +342,19 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+// pause waits d, or until the client goes away (false).
+func pause(r *http.Request, d time.Duration) bool {
+	if d == 0 {
+		return true
+	}
+	select {
+	case <-time.After(d):
+		return true
+	case <-r.Context().Done():
+		return false
 	}
 }
 

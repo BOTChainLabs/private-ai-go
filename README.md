@@ -85,6 +85,8 @@ if _, err := st.Verify(ctx); err != nil {
 
 NEAR signs streamed responses with its gateway key only, which does not prove the model produced them. For NEAR, `Stream` therefore makes one verified call and returns it as a single chunk.
 
+`Config.Timeout` (default 2 minutes) bounds each `Infer` call as a whole, attestation and verification included. For a stream it bounds opening it and `Verify`, but not reading it: only your context bounds a long answer.
+
 ## Policy
 
 By default only machines with Intel TCB status `UpToDate` or `OutOfDate` are accepted. Tighten it per provider:

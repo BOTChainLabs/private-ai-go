@@ -41,7 +41,8 @@ var errClosed = core.Errorf(core.CodeProviderError, nil, "NEAR provider is close
 type Options struct {
 	APIKey  string
 	BaseURL string // defaults to NEAR AI Cloud's gateway
-	// Timeout bounds each call, including the verification.
+	// Timeout bounds each call as a whole, including the identity check and
+	// the verification. A stream is one such call. Zero means 2 minutes.
 	Timeout time.Duration
 	Policy  core.Policy
 	// Workload is the gateway and model code to accept. Nil means

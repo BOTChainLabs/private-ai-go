@@ -167,7 +167,7 @@ func TestE2EEReceiptBindsRestoredRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	ex := &exchange{s: s, hashed: bytes.Replace(g.lastReq, []byte("secret"), []byte("other"), 1)}
-	_, err = p.verify(context.Background(), ex, "rcpt-1", "m", g.lastResp)
+	_, err = p.verify(context.Background(), context.Background(), ex, "rcpt-1", "m", g.lastResp)
 	assertCode(t, err, core.CodeReceiptInvalid)
 }
 
