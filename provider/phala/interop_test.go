@@ -88,8 +88,13 @@ func TestGatewayInterop(t *testing.T) {
 			// The receipt covers the restored request and the encrypted answer.
 			rid := resp.Header.Get("X-Receipt-Id")
 			raw := fetch(t, gw+"/v1/aci/receipts/"+rid)
-			if _, err := VerifyReceipt(raw, id, hashed, respBody); err != nil {
+			rr, err := VerifyReceipt(raw, id, hashed, respBody)
+			if err != nil {
 				t.Fatalf("receipt: %v\nreceipt %s", err, raw)
+			}
+			// The SDK requires the signed receipt_id to be the one named.
+			if rr.ReceiptID != rid {
+				t.Fatalf("X-Receipt-Id %q, receipt_id %q", rid, rr.ReceiptID)
 			}
 
 			// And the answer decrypts.

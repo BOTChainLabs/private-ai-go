@@ -109,13 +109,13 @@ func (st *stream) Verify(ctx context.Context) (*core.Verification, error) {
 	}
 	// With aci_verified the gateway never commits a stream early, so the
 	// header is expected; the completion id is the spec's fallback (§5.2).
-	receiptID := st.ex.resp.Header.Get("X-Receipt-Id")
+	receiptID, byCompletion := st.ex.resp.Header.Get("X-Receipt-Id"), false
 	if receiptID == "" {
-		receiptID = st.rd.ID
+		receiptID, byCompletion = st.rd.ID, true
 	}
 	vctx, cancel := context.WithTimeout(ctx, st.p.timeout)
 	defer cancel()
-	ver, err := st.p.verify(vctx, ctx, st.ex, receiptID, st.model, st.raw.Bytes())
+	ver, err := st.p.verify(vctx, ctx, st.ex, receiptID, byCompletion, st.model, st.raw.Bytes())
 	if err != nil {
 		return nil, err
 	}

@@ -115,10 +115,12 @@ func (p *Provider) sendOnce(ctx, caller context.Context, req core.InferRequest, 
 }
 
 // verify fetches the receipt for a completed exchange and checks it against
-// the exact response bytes. It returns a Verified result or a *core.Error
-// carrying the verification details. ctx bounds the verification; when the
-// caller's own context ends, its error is returned as is.
-func (p *Provider) verify(ctx, caller context.Context, ex *exchange, receiptID, model string, respBody []byte) (core.Verification, error) {
+// the exact response bytes. receiptID is the X-Receipt-Id the gateway named
+// or, when byCompletion, the completion id it is looked up by instead. It
+// returns a Verified result or a *core.Error carrying the verification
+// details. ctx bounds the verification; when the caller's own context ends,
+// its error is returned as is.
+func (p *Provider) verify(ctx, caller context.Context, ex *exchange, receiptID string, byCompletion bool, model string, respBody []byte) (core.Verification, error) {
 	ver := core.Verification{Status: core.Unverified, Provider: p.id, Model: model, Route: p.route}
 	if ex.enc != nil {
 		ver.Evidence.E2EE = e2ee.Algo
@@ -178,7 +180,16 @@ func (p *Provider) verify(ctx, caller context.Context, ex *exchange, receiptID, 
 	if err != nil {
 		return fail(core.Failed, core.CodeReceiptInvalid, err)
 	}
+	// The receipt must be the one asked for, as it states under its
+	// signature.
+	if byCompletion && rr.ChatID != receiptID && rr.ReceiptID != receiptID {
+		return fail(core.Failed, core.CodeReceiptInvalid, fmt.Errorf("receipt %q, returned for completion %q, is for completion %q", rr.ReceiptID, receiptID, rr.ChatID))
+	}
+	if !byCompletion && rr.ReceiptID != receiptID {
+		return fail(core.Failed, core.CodeReceiptInvalid, fmt.Errorf("receipt %q was returned for receipt %q", rr.ReceiptID, receiptID))
+	}
 	ver.Status = core.Verified
+	ver.Evidence.ReceiptID = rr.ReceiptID
 	ver.Evidence.SessionID = rr.SessionID
 	return ver, nil
 }
@@ -200,7 +211,7 @@ func (p *Provider) Infer(ctx context.Context, req core.InferRequest) (*core.Infe
 		return nil, core.Wrap(ctx, core.CodeProviderError, err, "read inference response")
 	}
 
-	ver, err := p.verify(callCtx, ctx, ex, ex.resp.Header.Get("X-Receipt-Id"), req.Model, respBody)
+	ver, err := p.verify(callCtx, ctx, ex, ex.resp.Header.Get("X-Receipt-Id"), false, req.Model, respBody)
 	if err != nil {
 		return nil, err
 	}

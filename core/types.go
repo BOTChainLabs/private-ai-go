@@ -92,9 +92,11 @@ type Evidence struct {
 	// be re-checked offline. For NEAR, Receipt is the model's signature.
 	KeysetDigest string // Phala
 	Keyset       json.RawMessage
-	ReceiptID    string
-	SessionID    string // Phala: the attested upstream session
-	Receipt      json.RawMessage
+	// ReceiptID is, for Phala, the receipt's own signed receipt_id once
+	// verified, and for NEAR the completion id the model signed.
+	ReceiptID string
+	SessionID string // Phala: the attested upstream session
+	Receipt   json.RawMessage
 
 	// E2EE is the suite message content was encrypted with to the attested
 	// gateway (Phala and Gateway), empty when only TLS protected it.

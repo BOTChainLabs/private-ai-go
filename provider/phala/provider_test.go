@@ -54,6 +54,8 @@ type fakeGateway struct {
 	receiptDigest   string             // overrides the digest the receipt names
 	receiptSigner   ed25519.PrivateKey // signs receipts instead of the current key
 	receiptDelay    time.Duration      // the receipt endpoint stalls this long
+	signedReceiptID string             // the receipt_id the receipt states; empty is "rcpt-1"
+	signedChatID    string             // the chat_id the receipt states; empty is "chatcmpl-1"
 	chatDelay       time.Duration      // the chat endpoint stalls this long before answering
 	partDelay       time.Duration      // pause between the parts of an answer
 	e2ee            *e2eetest.Service  // terminates E2EE v2 when set (call rotate after)
@@ -327,7 +329,7 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		events = append(events, map[string]any{"type": "response.returned", "body_hash": BodyHash(resp)})
 		doc := map[string]any{
-			"api_version": "aci/1", "receipt_id": "rcpt-1", "chat_id": "chatcmpl-1", "model": "m",
+			"api_version": "aci/1", "receipt_id": cmp.Or(g.signedReceiptID, "rcpt-1"), "chat_id": cmp.Or(g.signedChatID, "chatcmpl-1"), "model": "m",
 			"workload_keyset_digest": named, "endpoint": "/v1/chat/completions", "method": "POST",
 			"served_at": time.Now().Unix(), "key_id": "k1",
 			"event_log": events,
@@ -527,6 +529,27 @@ func TestReceiptNamingUnknownKeysetIsUnverified(t *testing.T) {
 	var e *core.Error
 	errors.As(err, &e)
 	if e.Verification == nil || e.Verification.Status != core.Unverified {
+		t.Fatalf("verification %+v", e.Verification)
+	}
+}
+
+// The receipt the gateway returns for the X-Receipt-Id it named must be
+// that receipt: a different one, even one covering the same bytes, is
+// refused.
+func TestReceiptMustBeTheOneRequested(t *testing.T) {
+	g := newFakeGateway(t)
+	res, err := g.provider(t).Infer(context.Background(), testReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Verification.Evidence.ReceiptID != "rcpt-1" {
+		t.Fatalf("receipt id %q", res.Verification.Evidence.ReceiptID)
+	}
+	g.signedReceiptID = "rcpt-other"
+	_, err = g.provider(t).Infer(context.Background(), testReq)
+	assertCode(t, err, core.CodeReceiptInvalid)
+	var e *core.Error
+	if errors.As(err, &e); e.Verification == nil || e.Verification.Status != core.Failed {
 		t.Fatalf("verification %+v", e.Verification)
 	}
 }
