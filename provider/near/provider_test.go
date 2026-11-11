@@ -176,9 +176,10 @@ func verified(kind string) func(string) (nearai.VerifiedCompletionResult, error)
 			SignatureKind: kind,
 			Signature:     nearai.CompletionSignature{Kind: kind, Signature: "5167"},
 			Attestation: &nearai.VerifiedAttestation{
-				Signer:     fixtureModel().Signer,
-				TCBStatus:  "UpToDate",
-				Deployment: nearai.MeasuredDeployment{RuntimeMeasurements: nearai.RuntimeMeasurements{ComposeHash: "c0ffee"}},
+				Signer:      fixtureModel().Signer,
+				TCBStatus:   "OutOfDate",
+				AdvisoryIDs: []string{"INTEL-SA-01192"},
+				Deployment:  nearai.MeasuredDeployment{RuntimeMeasurements: nearai.RuntimeMeasurements{ComposeHash: "c0ffee"}},
 			},
 		}, nil
 	}
@@ -207,6 +208,9 @@ func TestInferVerified(t *testing.T) {
 	}
 	if v.Route != "near-provider-tee" || v.Evidence.ReceiptID != "chatcmpl-n1" || v.Evidence.ComposeHash != "c0ffee" || len(v.Evidence.Receipt) == 0 {
 		t.Fatalf("verification %+v", v)
+	}
+	if v.Evidence.TCBStatus != "OutOfDate" || len(v.Evidence.AdvisoryIDs) != 1 || v.Evidence.AdvisoryIDs[0] != "INTEL-SA-01192" {
+		t.Fatalf("TCB evidence %+v", v.Evidence)
 	}
 }
 

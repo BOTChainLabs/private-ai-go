@@ -86,6 +86,10 @@ type Evidence struct {
 	ComposeHash string
 	OSImageHash string
 	TCBStatus   string
+	// AdvisoryIDs are the Intel security advisories (INTEL-SA-...) the TCB
+	// status refers to: for OutOfDate, the ones the platform lacks the
+	// fixes for.
+	AdvisoryIDs []string
 
 	// The response signature. For Phala, Receipt is the signed receipt and
 	// Keyset the canonical keyset whose key signed it, so the signature can

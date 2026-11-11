@@ -1,15 +1,19 @@
 package phala
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"maps"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	nearai "github.com/nearai/inference-sdk/go"
 
 	"github.com/BOTChainLabs/private-ai-go/core"
 	"github.com/BOTChainLabs/private-ai-go/internal/tdx"
@@ -79,6 +83,27 @@ var captured = time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
 
 func productionVerifier() *Verifier {
 	return &Verifier{Quote: offlineQuote("UpToDate"), Workload: ProductionWorkload()}
+}
+
+// The DCAP verifier's TCB status and advisories are kept with the
+// measurements read from the quote.
+func TestDCAPQuoteVerifierKeepsAdvisories(t *testing.T) {
+	r := loadReport(t, "attestation-nonce.json")
+	raw, _ := hex.DecodeString(r.Attestation.Evidence.Quote)
+	td, err := parseTDReport(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dcap := func(context.Context, string) (nearai.QuoteVerificationResult, error) {
+		return nearai.QuoteVerificationResult{TCBStatus: "OutOfDate", AdvisoryIDs: []string{"INTEL-SA-01312"}, ReportData: td.ReportData, RTMR3: td.RTMR3, MRConfigID: td.MRConfigID}, nil
+	}
+	q, err := dcapQuoteVerifier(dcap)(context.Background(), r.Attestation.Evidence.Quote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.TCBStatus != "OutOfDate" || !slices.Equal(q.AdvisoryIDs, []string{"INTEL-SA-01312"}) || !bytes.Equal(q.MRTD, td.MRTD) {
+		t.Fatalf("quote %+v", q)
+	}
 }
 
 func TestParseTDReportOnRealQuote(t *testing.T) {

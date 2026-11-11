@@ -308,6 +308,7 @@ func (p *Provider) verify(ctx, callerCtx context.Context, id, model string, e *e
 	}
 	if a := r.Attestation; a != nil {
 		ver.Evidence.TCBStatus = a.TCBStatus
+		ver.Evidence.AdvisoryIDs = slices.Clone(a.AdvisoryIDs)
 		ver.Evidence.ComposeHash = a.Deployment.RuntimeMeasurements.ComposeHash
 		ver.Evidence.OSImageHash = a.Deployment.RuntimeMeasurements.OSImageHash
 	}

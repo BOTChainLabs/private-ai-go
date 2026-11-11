@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,8 @@ type fakeGateway struct {
 	signedChatID    string             // the chat_id the receipt states; empty is "chatcmpl-1"
 	chatDelay       time.Duration      // the chat endpoint stalls this long before answering
 	partDelay       time.Duration      // pause between the parts of an answer
+	tcbStatus       string             // the quote's TCB status; empty is "UpToDate"
+	advisoryIDs     []string           // the quote's Intel advisories
 	e2ee            *e2eetest.Service  // terminates E2EE v2 when set (call rotate after)
 	noTLSKey        bool               // keyset lists no TLS key (call rotate after)
 	futureSuite     bool               // keyset lists an E2EE suite of unknown shape first (call rotate after)
@@ -172,14 +175,15 @@ func (g *fakeGateway) quote(_ context.Context, hexQuote string) (QuoteResult, er
 		mrConfig = mrConfigV1(compose)
 	}
 	return QuoteResult{
-		TCBStatus:  "UpToDate",
-		ReportData: rd,
-		MRTD:       unhex(os.MRTD),
-		RTMR0:      unhex(os.RTMR0),
-		RTMR1:      unhex(os.RTMR1),
-		RTMR2:      unhex(os.RTMR2),
-		MRConfigID: mrConfig,
-		RTMR3:      g.rtmr3,
+		TCBStatus:   cmp.Or(g.tcbStatus, "UpToDate"),
+		AdvisoryIDs: g.advisoryIDs,
+		ReportData:  rd,
+		MRTD:        unhex(os.MRTD),
+		RTMR0:       unhex(os.RTMR0),
+		RTMR1:       unhex(os.RTMR1),
+		RTMR2:       unhex(os.RTMR2),
+		MRConfigID:  mrConfig,
+		RTMR3:       g.rtmr3,
 	}, nil
 }
 
@@ -412,6 +416,26 @@ func TestInferRejectsOptionalUpstream(t *testing.T) {
 	g.notRequired = true
 	_, err := g.provider(t).Infer(context.Background(), testReq)
 	assertCode(t, err, core.CodeReceiptInvalid)
+}
+
+// The default accepts an OutOfDate platform, and the evidence names the
+// advisories it lacks the fixes for; a stricter policy refuses it.
+func TestTCBStatusAndAdvisories(t *testing.T) {
+	g := newFakeGateway(t)
+	g.tcbStatus, g.advisoryIDs = "OutOfDate", []string{"INTEL-SA-01192", "INTEL-SA-01245"}
+	res, err := g.provider(t).Infer(context.Background(), testReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev := res.Verification.Evidence; ev.TCBStatus != "OutOfDate" || !slices.Equal(ev.AdvisoryIDs, g.advisoryIDs) {
+		t.Fatalf("evidence %+v", ev)
+	}
+	strict := func(o *Options) { o.Policy.AcceptedTCBStatuses = []string{"UpToDate"} }
+	_, err = g.provider(t, strict).Infer(context.Background(), testReq)
+	assertCode(t, err, core.CodeAttestationFailed)
+	if !strings.Contains(err.Error(), "INTEL-SA-01192") {
+		t.Fatalf("error does not name the advisories: %v", err)
+	}
 }
 
 func TestAttestRejectsWrongTLSKey(t *testing.T) {

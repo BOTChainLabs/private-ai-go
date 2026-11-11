@@ -9,8 +9,15 @@ import (
 // provider's built-in checks.
 type Policy struct {
 	// AcceptedTCBStatuses lists the Intel TCB statuses accepted for a TEE.
-	// Empty means UpToDate and OutOfDate; revoked platforms and platforms
-	// that need configuration changes are refused.
+	// Empty means UpToDate and OutOfDate; revoked platforms, and platforms
+	// that need configuration changes or software hardening, are refused.
+	//
+	// OutOfDate means the platform lacks the fixes of the Intel advisories
+	// that Evidence.AdvisoryIDs names. It is accepted by default because
+	// providers' platforms run behind Intel's TCB recoveries (on 2026-11-11
+	// NEAR AI's gateway was OutOfDate, for INTEL-SA-01192, -01245, -01312
+	// and -01313), and refusing it would stop every call to them until they
+	// patch. Set []string{"UpToDate"} to refuse it.
 	AcceptedTCBStatuses []string
 	// ComposeHashes, when set, accepts only deployments whose measured
 	// app-compose hash (hex) is listed. Empty accepts any compose the

@@ -89,7 +89,7 @@ NEAR signs streamed responses with its gateway key only, which does not prove th
 
 ## Policy
 
-By default only machines with Intel TCB status `UpToDate` or `OutOfDate` are accepted. Tighten it per provider:
+By default machines with Intel TCB status `UpToDate` or `OutOfDate` are accepted. `OutOfDate` means the platform lacks the fixes of the Intel advisories that `Evidence.AdvisoryIDs` lists. It is accepted because providers run behind Intel's TCB recoveries (NEAR AI's gateway was `OutOfDate` on 2026-11-11), and refusing it would stop every call to them until they patch. Tighten it per provider:
 
 ```go
 privateai.Phala: {
@@ -144,7 +144,7 @@ The gateway's TLS must end inside its TEE, with its key in the attested keyset, 
 
 ## What `Verified` records
 
-`res.Verification.Evidence` holds what the result was checked against: the provider app, OS image and compose hashes, the TCB status and the signed receipt or signature, ready to archive.
+`res.Verification.Evidence` holds what the result was checked against: the provider app, OS image and compose hashes, the TCB status with the Intel advisories it refers to, and the signed receipt or signature, ready to archive.
 
 ## Errors
 

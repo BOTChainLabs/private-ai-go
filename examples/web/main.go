@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -204,6 +205,9 @@ func tcb(e privateai.Evidence) string {
 	if e.TCBStatus == "" {
 		return ""
 	}
+	if len(e.AdvisoryIDs) > 0 {
+		return " TCB status " + e.TCBStatus + " (" + strings.Join(e.AdvisoryIDs, ", ") + ")."
+	}
 	return " TCB status " + e.TCBStatus + "."
 }
 
@@ -364,6 +368,7 @@ func verificationView(v *privateai.Verification) map[string]any {
 		"reasons":  v.Reasons,
 		"evidence": map[string]string{
 			"tcb_status":    e.TCBStatus,
+			"advisory_ids":  strings.Join(e.AdvisoryIDs, ", "),
 			"app_id":        e.AppID,
 			"compose_hash":  e.ComposeHash,
 			"os_image_hash": e.OSImageHash,

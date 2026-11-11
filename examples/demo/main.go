@@ -92,7 +92,7 @@ func run() error {
 	fmt.Println()
 	fmt.Printf("status:   %s\n", v.Status)
 	fmt.Printf("route:    %s\n", v.Route)
-	fmt.Printf("tcb:      %s\n", v.Evidence.TCBStatus)
+	fmt.Printf("tcb:      %s %s\n", v.Evidence.TCBStatus, strings.Join(v.Evidence.AdvisoryIDs, ","))
 	fmt.Printf("compose:  %s\n", v.Evidence.ComposeHash)
 	fmt.Printf("receipt:  %s\n", v.Evidence.ReceiptID)
 	fmt.Printf("tokens:   %d\n", usage.TotalTokens)

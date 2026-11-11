@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/BOTChainLabs/private-ai-go/core"
@@ -172,6 +173,7 @@ func (p *Provider) verify(ctx, caller context.Context, ex *exchange, receiptID s
 	ver.Evidence.OSImageHash = vs.id.OSImageHash
 	ver.Evidence.ComposeHash = vs.id.ComposeHash
 	ver.Evidence.TCBStatus = vs.id.TCBStatus
+	ver.Evidence.AdvisoryIDs = slices.Clone(vs.id.AdvisoryIDs)
 	if !p.now().Before(vs.id.NotAfter) {
 		return fail(core.Unverified, core.CodeEvidenceUnavailable, errors.New("keyset expired before the receipt was verified"))
 	}

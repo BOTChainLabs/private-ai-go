@@ -100,6 +100,8 @@ type Identity struct {
 	AppID       string
 	OSImageHash string
 	TCBStatus   string
+	// AdvisoryIDs are the Intel advisories the TCB status refers to.
+	AdvisoryIDs []string
 	// Serving is the serving mode the report states ("direct" or
 	// "aggregator"). It is outside the attested keyset, so VerifyReceipt
 	// trusts it only with TLSPins, when the report came over an attested
@@ -197,7 +199,7 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 		return nil, fmt.Errorf("quote comes from a debug TD")
 	}
 	if !v.Policy.AcceptsTCB(q.TCBStatus) {
-		return nil, fmt.Errorf("TCB status %q is not accepted (accepted: %v)", q.TCBStatus, v.Policy.TCBStatuses())
+		return nil, fmt.Errorf("TCB status %q (advisories %v) is not accepted (accepted: %v)", q.TCBStatus, q.AdvisoryIDs, v.Policy.TCBStatuses())
 	}
 	if len(q.ReportData) != 64 || !bytes.Equal(q.ReportData[:32], want[:]) || !bytes.Equal(q.ReportData[32:], make([]byte, 32)) {
 		return nil, fmt.Errorf("quote report_data does not match the attestation statement")
@@ -300,6 +302,7 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 		AppID:        events["app-id"],
 		OSImageHash:  events["os-image-hash"],
 		TCBStatus:    q.TCBStatus,
+		AdvisoryIDs:  q.AdvisoryIDs,
 		Serving:      rep.ServiceCapabilities.Serving,
 	}
 	if hasRepo {
