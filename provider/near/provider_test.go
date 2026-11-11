@@ -375,6 +375,22 @@ func TestNewBuildsGatewayClient(t *testing.T) {
 	}
 }
 
+// The API key goes out with the first attestation fetch, so a base URL
+// that is not https is refused before anything is sent.
+func TestNewRefusesPlainHTTP(t *testing.T) {
+	for _, u := range []string{"http://127.0.0.1:8080/v1", "ftp://cloud-api.near.ai/v1", "https://", "cloud-api.near.ai/v1"} {
+		if p, err := New(Options{APIKey: "k", BaseURL: u}); err == nil {
+			p.Close()
+			t.Errorf("accepted %q", u)
+		}
+	}
+	p, err := New(Options{APIKey: "k", BaseURL: "https://cloud-api.near.ai/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+}
+
 // TestLive calls NEAR AI Cloud for real: attestation, E2EE, inference and
 // signature verification, for both a plain and a streamed completion.
 func TestLive(t *testing.T) {

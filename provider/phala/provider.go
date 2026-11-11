@@ -108,7 +108,8 @@ func New(o Options) (*Provider, error) {
 	}
 	base, err := url.Parse(raw)
 	if err != nil || base.Scheme != "https" || base.Host == "" {
-		return nil, fmt.Errorf("%s: base URL must be https: %q", id, raw)
+		// Not echoed: a URL can carry credentials.
+		return nil, fmt.Errorf("%s: base URL must be an https URL", id)
 	}
 	// Phala's identity proves nothing about another gateway, and an empty
 	// one would accept any app on any OS.

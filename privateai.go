@@ -65,7 +65,7 @@ const (
 type ProviderConfig struct {
 	APIKey string
 	// BaseURL is the gateway's https URL: required for Gateway, optional
-	// for Phala and NEAR (testing).
+	// for Phala and NEAR (testing). Any other scheme is refused.
 	BaseURL string
 	// Policy tightens which attested deployments are accepted. The zero
 	// value accepts the TCB statuses UpToDate and OutOfDate and any compose

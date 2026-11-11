@@ -40,7 +40,7 @@ var errClosed = core.Errorf(core.CodeProviderError, nil, "NEAR provider is close
 
 type Options struct {
 	APIKey  string
-	BaseURL string // defaults to NEAR AI Cloud's gateway
+	BaseURL string // https; defaults to NEAR AI Cloud's gateway
 	// Timeout bounds each call as a whole, including the identity check and
 	// the verification. A stream is one such call. Zero means 2 minutes.
 	Timeout time.Duration
@@ -73,6 +73,14 @@ type Provider struct {
 func New(o Options) (*Provider, error) {
 	if o.APIKey == "" {
 		return nil, errors.New("near: API key is required")
+	}
+	// The API key goes out with the first attestation fetch, before any
+	// TLS key is pinned: never over plain HTTP. The URL itself is not
+	// echoed, since it can carry credentials.
+	if o.BaseURL != "" {
+		if u, err := url.Parse(o.BaseURL); err != nil || u.Scheme != "https" || u.Host == "" {
+			return nil, errors.New("near: base URL must be an https URL")
+		}
 	}
 	w := ProductionWorkload()
 	if o.Workload != nil {

@@ -3,8 +3,12 @@ package privateai
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/BOTChainLabs/private-ai-go/provider/near"
@@ -214,5 +218,33 @@ func TestGatewayConfigValidation(t *testing.T) {
 func TestPhalaE2EEIsOptIn(t *testing.T) {
 	if phalaOptions(ProviderConfig{}, 0).E2EE || !phalaOptions(ProviderConfig{E2EE: true}, 0).E2EE {
 		t.Fatal("ProviderConfig.E2EE not passed to Phala")
+	}
+}
+
+// No provider sends the API key over plain HTTP: a base URL that is not
+// https is refused when the client is created.
+func TestPlainHTTPBaseURLRefused(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	for _, id := range []ProviderID{Phala, NEAR} {
+		c, err := New(Config{
+			Providers: map[ProviderID]ProviderConfig{id: {APIKey: "sk-secret", BaseURL: srv.URL + "/v1"}},
+			Models:    []ModelEntry{{Provider: id, Model: "m"}},
+		})
+		if err == nil {
+			c.Infer(context.Background(), InferRequest{Provider: id, Model: "m", Messages: []Message{{Role: "user", Content: "hi"}}})
+			c.Close()
+			t.Errorf("%s: accepted an http base URL", id)
+		}
+		if strings.Contains(fmt.Sprint(err), "sk-secret") {
+			t.Errorf("%s: the error shows the API key: %v", id, err)
+		}
+	}
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("%d requests reached the plain-HTTP server", n)
 	}
 }
