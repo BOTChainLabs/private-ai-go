@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -284,5 +286,120 @@ func TestEstablishedRecordsAppPerSigner(t *testing.T) {
 	}
 	if err := m.checkSession(nearai.AttestationVerificationResult{Models: []nearai.VerifiedAttestation{{Signer: a}}}); err == nil {
 		t.Fatal("session without a gateway accepted")
+	}
+}
+
+// fakeDCAP stands in for Intel DCAP: it reads the real quote's fields.
+func fakeDCAP(_ context.Context, hexQuote string) (nearai.QuoteVerificationResult, error) {
+	m, err := tdx.ParseHexQuote(hexQuote)
+	if err != nil {
+		return nearai.QuoteVerificationResult{}, err
+	}
+	return nearai.QuoteVerificationResult{TCBStatus: "UpToDate", ReportData: m.ReportData, MRConfigID: m.MRConfigID, RTMR3: m.RTMR3}, nil
+}
+
+// NEAR's SDK verifies every session it creates, including one that replaces
+// the session checkIdentity saw, with sessionOptions: each quote must come
+// from a machine the identity check established as NEAR's gateway or model
+// app, within identityMaxAge. The real reports go through the SDK's own
+// verification here.
+func TestSessionsAreHeldToTheIdentity(t *testing.T) {
+	ctx := context.Background()
+	src := &fakeSource{gateway: fixtureGateway(), models: []nearai.Attestation{fixtureModel()}}
+	ident := newFakeIdentity(src)
+	gwOpts, modelOpts := sessionOptions(osQuoteVerifier(fakeDCAP, ProductionWorkload().OS), core.Policy{}.TCBStatuses(), ident)
+	modelOpts.GPUVerifier = func(context.Context, string) error { return nil } // NVIDIA's service is not reached
+	g, m := fixtureGateway(), fixtureModel()
+	verifyGateway := func() error {
+		_, err := nearai.VerifyGatewayAttestation(ctx, g, nearai.ClientBinding{Nonce: g.Nonce, SPKIFingerprint: g.SPKIFingerprint}, gwOpts)
+		return err
+	}
+	verifyModel := func() error {
+		_, err := nearai.VerifyModelAttestation(ctx, m, nearai.ClientBinding{Nonce: m.Nonce}, modelOpts)
+		return err
+	}
+
+	// Before the identity check, no session can be made on these machines.
+	if err := verifyGateway(); !errors.Is(err, errUnestablished) {
+		t.Fatalf("gateway before the identity check: %v", err)
+	}
+	if err := verifyModel(); !errors.Is(err, errUnestablished) {
+		t.Fatalf("model before the identity check: %v", err)
+	}
+	if _, err := ident.get(ctx, testReq.Model); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyGateway(); err != nil {
+		t.Fatalf("established gateway: %v", err)
+	}
+	if err := verifyModel(); err != nil {
+		t.Fatalf("established model: %v", err)
+	}
+	// A machine established as the gateway is not a model, and the reverse.
+	gq, _ := tdx.ParseHexQuote(g.IntelQuote)
+	mq, _ := tdx.ParseHexQuote(m.IntelQuote)
+	if ident.knows(roleModel, gq.RTMR3) || ident.knows(roleGateway, mq.RTMR3) {
+		t.Fatal("roles mixed")
+	}
+	// Once the identity is older than identityMaxAge, sessions are refused
+	// until it is established again.
+	ident.now = func() time.Time { return time.Now().Add(identityMaxAge + time.Minute) }
+	if err := verifyModel(); !errors.Is(err, errUnestablished) {
+		t.Fatalf("model after the identity expired: %v", err)
+	}
+}
+
+// A session NEAR's SDK refused, being on a machine not established yet, is
+// retried once the identity check has fetched again.
+func TestUnestablishedSessionIsLearned(t *testing.T) {
+	f, p := newFake(t, gatewayKnobs{})
+	f.unestablished.Store(2)
+	if _, err := p.Infer(context.Background(), testReq); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.src.fetches.Load(); n != 3 {
+		t.Fatalf("%d identity rounds, want 3", n)
+	}
+	f.unestablished.Store(learnRounds + 1)
+	_, err := p.Infer(context.Background(), testReq)
+	assertCode(t, err, core.CodeAttestationFailed)
+}
+
+// gateOnceTransport fails the first requests as NEAR's SDK does when it
+// replaced its session, just before sending, on a machine not established
+// yet: nothing reaches the server.
+type gateOnceTransport struct {
+	fails atomic.Int32
+	next  http.RoundTripper
+}
+
+func (g *gateOnceTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if g.fails.Load() > 0 {
+		g.fails.Add(-1)
+		return nil, gateRefusal()
+	}
+	return g.next.RoundTrip(r)
+}
+
+// When the SDK's session is replaced between the identity check and the
+// send and the new one is refused, the call checks the identity again and
+// sends once more; a second refusal fails the call. Nothing is sent under a
+// refused session.
+func TestReplacedSessionBeforeSend(t *testing.T) {
+	f, p := newFake(t, gatewayKnobs{})
+	gate := &gateOnceTransport{next: f.srv.Client().Transport}
+	gate.fails.Store(1)
+	f.transport = gate
+	if _, err := p.Infer(context.Background(), testReq); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.requests.Load(); n != 1 {
+		t.Fatalf("%d requests reached the server", n)
+	}
+	gate.fails.Store(2)
+	_, err := p.Infer(context.Background(), testReq)
+	assertCode(t, err, core.CodeAttestationFailed)
+	if n := f.requests.Load(); n != 1 {
+		t.Fatalf("%d requests reached the server", n)
 	}
 }

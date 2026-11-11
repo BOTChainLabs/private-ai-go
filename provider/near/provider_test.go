@@ -29,6 +29,9 @@ type fakeClient struct {
 	verify    func(id string) (nearai.VerifiedCompletionResult, error)
 	src       *fakeSource
 	requests  atomic.Int32 // chat requests that reached the server
+	// unestablished makes the next Verify calls fail as NEAR's SDK does
+	// for a session on a machine not established yet.
+	unestablished atomic.Int32
 
 	mu       sync.Mutex
 	verified []string
@@ -36,7 +39,17 @@ type fakeClient struct {
 }
 
 func (f *fakeClient) Verify(context.Context, string) (nearai.AttestationVerificationResult, error) {
+	if f.unestablished.Load() > 0 {
+		f.unestablished.Add(-1)
+		return nearai.AttestationVerificationResult{}, gateRefusal()
+	}
 	return f.session, nil
+}
+
+// gateRefusal is the error NEAR's SDK returns when sessionOptions refuses a
+// quote from a machine not established yet.
+func gateRefusal() error {
+	return &nearai.Error{Code: "quote.verification_failed", Cause: fmt.Errorf("%w (RTMR3 00)", errUnestablished)}
 }
 
 // fakeSource serves the real NEAR attestations saved in testdata.

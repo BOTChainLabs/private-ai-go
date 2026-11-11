@@ -2,6 +2,7 @@ package near
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -59,12 +60,67 @@ type (
 )
 
 // established is what an identity check proved for one model: the gateway
-// TLS keys and model signing keys that belong to NEAR's apps. It is not
-// modified once published; merge returns a new one.
+// TLS keys and model signing keys that belong to NEAR's apps, and the RTMR3
+// of each machine that passed. It is not modified once published; merge
+// returns a new one.
 type established struct {
-	gatewaySPKIs []string
-	apps         map[string]string // model signer (signerKey) -> its app ID
-	expires      time.Time
+	gatewaySPKIs  []string
+	apps          map[string]string // model signer (signerKey) -> its app ID
+	gatewayRTMR3s []string          // hex
+	modelRTMR3s   []string          // hex
+	expires       time.Time
+}
+
+// errUnestablished refuses a quote from a machine the identity check has not
+// established, or not within identityMaxAge.
+var errUnestablished = errors.New("machine not established as a NEAR app")
+
+// role is what a machine was established as.
+type role int
+
+const (
+	roleGateway role = iota
+	roleModel
+)
+
+// gate extends verify, which NEAR's SDK verifies its sessions' quotes with,
+// to accept only machines this identity has established in r: a quote's
+// RTMR3 must be one whose event log was replayed and passed the app, KMS
+// and OS checks. RTMR3 commits to every RTMR3 event, the app-id and
+// key-provider among them, so another app's or KMS's machine cannot have it.
+func (id *identity) gate(verify nearai.QuoteVerifier, r role) nearai.QuoteVerifier {
+	return func(ctx context.Context, hexQuote string) (nearai.QuoteVerificationResult, error) {
+		q, err := verify(ctx, hexQuote)
+		if err != nil {
+			return q, err
+		}
+		if !id.knows(r, q.RTMR3) {
+			return nearai.QuoteVerificationResult{}, fmt.Errorf("%w (RTMR3 %x)", errUnestablished, q.RTMR3)
+		}
+		return q, nil
+	}
+}
+
+// knows reports whether an unexpired identity has established a machine
+// with rtmr3 in r.
+func (id *identity) knows(r role, rtmr3 []byte) bool {
+	h := hex.EncodeToString(rtmr3)
+	id.mu.Lock()
+	defer id.mu.Unlock()
+	now := id.now()
+	for _, e := range id.cache {
+		if !now.Before(e.expires) {
+			continue
+		}
+		list := e.modelRTMR3s
+		if r == roleGateway {
+			list = e.gatewayRTMR3s
+		}
+		if slices.Contains(list, h) {
+			return true
+		}
+	}
+	return false
 }
 
 func signerKey(s nearai.SigningIdentity) string {
@@ -75,9 +131,10 @@ func signerKey(s nearai.SigningIdentity) string {
 // app and KMS read from the RTMR3 event log. The SDK's policy hooks do not
 // expose the event log, so the gateway and model reports are fetched and
 // fully verified here (quote, binding, event-log replay; the GPU is checked
-// by the SDK's own preflight). The keys they establish are then required of
-// the SDK's session before a prompt is sent, and of every response
-// signature.
+// by the SDK's own preflight). The SDK then accepts, for any session it
+// creates, only quotes from the machines established here (gate); their
+// keys are required of the SDK's session before a prompt is sent, and of
+// every response signature.
 type identity struct {
 	src           attestationSource
 	verifyGateway verifyGatewayFunc
@@ -117,23 +174,6 @@ func (id *identity) cached(model string) *established {
 		return e
 	}
 	return nil
-}
-
-// covering returns an identity that covers the session's keys, establishing
-// more of the model's machines when e does not cover them yet.
-func (id *identity) covering(ctx context.Context, model string, e *established, sess nearai.AttestationVerificationResult) (*established, error) {
-	for round := 0; ; round++ {
-		err := e.checkSession(sess)
-		if err == nil {
-			return e, nil
-		}
-		if round == learnRounds {
-			return nil, core.Errorf(core.CodeAttestationFailed, err, "NEAR session")
-		}
-		if e, err = id.refresh(ctx, model); err != nil {
-			return nil, err
-		}
-	}
 }
 
 // refresh establishes the model's identity once more and adds what it proves
@@ -185,6 +225,7 @@ func (id *identity) establish(ctx context.Context, model string) (*established, 
 		return nil, core.Errorf(core.CodeAttestationFailed, err, "gateway is not NEAR's gateway app")
 	}
 	e.gatewaySPKIs = append(e.gatewaySPKIs, strings.ToLower(vg.SPKIFingerprint))
+	e.gatewayRTMR3s = append(e.gatewayRTMR3s, rtmr3Of(g.Attestation))
 
 	m, err := id.src.FetchModelAttestations(ctx, model, opts)
 	if err != nil {
@@ -207,8 +248,18 @@ func (id *identity) establish(ctx context.Context, model string) (*established, 
 			return nil, core.Errorf(core.CodeAttestationFailed, err, "model %s instance %s is not a NEAR model app", model, a.InstanceID)
 		}
 		e.apps[signerKey(vm.Signer)] = appID
+		e.modelRTMR3s = append(e.modelRTMR3s, rtmr3Of(a))
 	}
 	return e, nil
+}
+
+// rtmr3Of is the hex RTMR3 of a report checkApp has accepted.
+func rtmr3Of(a nearai.Attestation) string {
+	m, err := tdx.ParseHexQuote(a.IntelQuote)
+	if err != nil {
+		return "" // not reached: checkApp parsed the same quote
+	}
+	return hex.EncodeToString(m.RTMR3)
 }
 
 // precheckOS names an unknown OS build, which the SDK's verification would
@@ -240,17 +291,25 @@ func checkApp(a nearai.Attestation, os []tdx.OSMeasurement, app tdx.App) (string
 	return events["app-id"], app.Check(events)
 }
 
-// merge returns e extended by the keys of fresh, expiring with e.
+// merge returns e extended by the keys and machines of fresh, expiring
+// with e.
 func (e *established) merge(fresh *established) *established {
 	m := &established{apps: maps.Clone(e.apps), expires: e.expires}
 	maps.Copy(m.apps, fresh.apps)
-	m.gatewaySPKIs = slices.Clone(e.gatewaySPKIs)
-	for _, s := range fresh.gatewaySPKIs {
-		if !slices.Contains(m.gatewaySPKIs, s) {
-			m.gatewaySPKIs = append(m.gatewaySPKIs, s)
+	m.gatewaySPKIs = union(e.gatewaySPKIs, fresh.gatewaySPKIs)
+	m.gatewayRTMR3s = union(e.gatewayRTMR3s, fresh.gatewayRTMR3s)
+	m.modelRTMR3s = union(e.modelRTMR3s, fresh.modelRTMR3s)
+	return m
+}
+
+func union(a, b []string) []string {
+	out := slices.Clone(a)
+	for _, s := range b {
+		if !slices.Contains(out, s) {
+			out = append(out, s)
 		}
 	}
-	return m
+	return out
 }
 
 func (e *established) hasSigner(s nearai.SigningIdentity) bool {
