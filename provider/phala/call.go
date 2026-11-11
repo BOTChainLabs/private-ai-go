@@ -143,7 +143,10 @@ func (p *Provider) verify(ctx context.Context, ex *exchange, receiptID, model st
 	ver.Evidence.Receipt = rawReceipt
 
 	// Verify under the keyset the receipt itself names (it is signed), not
-	// the response header.
+	// the response header. The keyset the request was sent under was fresh
+	// when it was sent, so it stays trusted for this receipt, however long
+	// the answer took; any other keyset must have been attested within
+	// identityMaxAge (sessionFor).
 	var named struct {
 		Digest string `json:"workload_keyset_digest"`
 	}

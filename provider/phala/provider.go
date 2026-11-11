@@ -88,7 +88,7 @@ type Provider struct {
 	mu      sync.Mutex
 	closed  bool
 	current *session            // used for new requests
-	known   map[string]*session // every unexpired verified keyset, by digest
+	known   map[string]*session // every keyset attested within identityMaxAge, by digest
 }
 
 func New(o Options) (*Provider, error) {
@@ -218,13 +218,15 @@ func (p *Provider) refresh(ctx context.Context) (*session, error) {
 
 // sessionFor returns an established session for the keyset a receipt names.
 // A deployment may run replicas with their own keysets (spec §3.3), so a
-// keyset not seen yet is looked for with a few fresh preflights. Sessions
-// other callers are using stay valid meanwhile.
+// keyset not seen yet is looked for with a few fresh preflights. A keyset is
+// trusted for this only while its attestation is fresh, like the current
+// one: an older one is looked for again. Sessions other callers are using
+// stay valid meanwhile.
 func (p *Provider) sessionFor(ctx context.Context, digest string) (*session, error) {
 	p.mu.Lock()
 	s := p.known[digest]
 	p.mu.Unlock()
-	if s != nil && p.now().Before(s.id.NotAfter) {
+	if s != nil && p.now().Before(s.expires) {
 		return s, nil
 	}
 	for range attestTries {
@@ -300,7 +302,8 @@ func (p *Provider) attest(ctx context.Context) (*session, error) {
 }
 
 // store records a verified identity as current, reusing the pinned transport
-// of an earlier session for the same keyset, and drops expired keysets.
+// of an earlier session for the same keyset, and drops keysets whose
+// attestation is no longer fresh.
 func (p *Provider) store(id *Identity) (*session, error) {
 	now := p.now()
 	expires := now.Add(identityMaxAge)
@@ -328,7 +331,7 @@ func (p *Provider) store(id *Identity) (*session, error) {
 	p.known[id.KeysetDigest] = s
 	p.current = s
 	for d, k := range p.known {
-		if !now.Before(k.id.NotAfter) {
+		if !now.Before(k.expires) {
 			delete(p.known, d)
 			k.transport.CloseIdleConnections()
 		}

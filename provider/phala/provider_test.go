@@ -51,16 +51,17 @@ type fakeGateway struct {
 	notRequired     bool
 	noReceiptHeader bool // receipt is then looked up by completion id
 	streamError     bool
-	receiptDigest   string            // overrides the digest the receipt names
-	e2ee            *e2eetest.Service // terminates E2EE v2 when set (call rotate after)
-	noTLSKey        bool              // keyset lists no TLS key (call rotate after)
-	futureSuite     bool              // keyset lists an E2EE suite of unknown shape first (call rotate after)
-	plainResponse   bool              // answers an E2EE request in plaintext
-	mrConfig        []byte            // the quote's MRCONFIGID; nil is version 1 of appCompose
-	serving         string            // service_capabilities.serving; empty is "aggregator"
-	versions        []string          // service_capabilities.supported_e2ee_versions; nil follows e2ee
-	upstream        string            // the receipt's upstream.verified result; empty is "verified", "none" omits the event
-	lastWire        []byte            // the request body as received
+	receiptDigest   string             // overrides the digest the receipt names
+	receiptSigner   ed25519.PrivateKey // signs receipts instead of the current key
+	e2ee            *e2eetest.Service  // terminates E2EE v2 when set (call rotate after)
+	noTLSKey        bool               // keyset lists no TLS key (call rotate after)
+	futureSuite     bool               // keyset lists an E2EE suite of unknown shape first (call rotate after)
+	plainResponse   bool               // answers an E2EE request in plaintext
+	mrConfig        []byte             // the quote's MRCONFIGID; nil is version 1 of appCompose
+	serving         string             // service_capabilities.serving; empty is "aggregator"
+	versions        []string           // service_capabilities.supported_e2ee_versions; nil follows e2ee
+	upstream        string             // the receipt's upstream.verified result; empty is "verified", "none" omits the event
+	lastWire        []byte             // the request body as received
 	receipt404      atomic.Int32
 	attestations    atomic.Int32
 	chats           atomic.Int32 // chat requests received
@@ -321,6 +322,9 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		raw, _ := json.Marshal(doc)
 		signed, _ := canon.Canonicalize(raw)
+		if g.receiptSigner != nil {
+			key = g.receiptSigner
+		}
 		doc["signature"] = hex.EncodeToString(ed25519.Sign(key, signed))
 		json.NewEncoder(w).Encode(doc)
 
@@ -443,6 +447,50 @@ func TestKeysetRotationIsReestablished(t *testing.T) {
 	}
 	if res.Verification.Evidence.KeysetDigest != g.digest || g.attestations.Load() != 2 {
 		t.Fatalf("digest %s (want %s), attestations %d", res.Verification.Evidence.KeysetDigest, g.digest, g.attestations.Load())
+	}
+}
+
+// A keyset other than the one a request was sent under is trusted for its
+// receipt only while its attestation is fresh, as the current one is: a
+// replica's keyset attested within the hour is accepted, an older one must
+// be attested again.
+func TestKnownKeysetTrustedOnlyWhileFresh(t *testing.T) {
+	g := newFakeGateway(t)
+	var offset atomic.Int64
+	p := g.provider(t, func(o *Options) {
+		o.Now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+	})
+	id1, err := p.Attest(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	k1 := g.key
+	g.mu.Unlock()
+	// The gateway now attests keyset 2, which the next call establishes.
+	g.rotate(0x08)
+	offset.Store(int64(time.Minute))
+	if _, err := p.Infer(context.Background(), testReq); err != nil {
+		t.Fatal(err)
+	}
+	// A replica still signs with keyset 1, attested 30 minutes ago.
+	g.receiptDigest, g.receiptSigner = id1.KeysetDigest, k1
+	offset.Store(int64(30 * time.Minute))
+	res, err := p.Infer(context.Background(), testReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Verification.Evidence.KeysetDigest != id1.KeysetDigest || g.attestations.Load() != 2 {
+		t.Fatalf("keyset %s, %d attestations", res.Verification.Evidence.KeysetDigest, g.attestations.Load())
+	}
+	// 90 minutes after it was attested, keyset 1 is no longer trusted, though
+	// its not_after is weeks away; the gateway no longer attests it.
+	offset.Store(int64(90 * time.Minute))
+	_, err = p.Infer(context.Background(), testReq)
+	assertCode(t, err, core.CodeEvidenceUnavailable)
+	var e *core.Error
+	if errors.As(err, &e); e.Verification == nil || e.Verification.Status != core.Unverified {
+		t.Fatalf("verification %+v", e.Verification)
 	}
 }
 
