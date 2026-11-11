@@ -153,3 +153,53 @@ func TestVerifyReceiptToleratesFailedAttempts(t *testing.T) {
 		t.Fatalf("receipt with a failed attempt before the verified one rejected: %v", err)
 	}
 }
+
+// A receipt without upstream events is accepted only from a direct service
+// whose report came over a pinned TLS key; a receipt that records upstream
+// attempts needs a verified one whatever the serving mode.
+func TestVerifyReceiptServingMode(t *testing.T) {
+	noUpstream := resign(t, func(d map[string]any) {
+		var kept []any
+		for _, e := range d["event_log"].([]any) {
+			if e.(map[string]any)["type"] != "upstream.verified" {
+				kept = append(kept, e)
+			}
+		}
+		d["event_log"] = kept
+	})
+	failedUpstream := resign(t, func(d map[string]any) {
+		for _, e := range d["event_log"].([]any) {
+			if ev := e.(map[string]any); ev["type"] == "upstream.verified" {
+				ev["result"] = "failed"
+			}
+		}
+	})
+	direct := func(pinned bool) *Identity {
+		id := vecIdentity()
+		id.Serving = "direct"
+		if pinned {
+			id.TLSPins = []string{strings.Repeat("c0", 32)}
+		}
+		return id
+	}
+	cases := []struct {
+		name    string
+		receipt []byte
+		id      *Identity
+		ok      bool
+	}{
+		{"direct, pinned, no upstream event", noUpstream, direct(true), true},
+		{"direct, unpinned, no upstream event", noUpstream, direct(false), false},
+		{"direct, pinned, failed upstream event", failedUpstream, direct(true), false},
+		{"direct, unpinned, failed upstream event", failedUpstream, direct(false), false},
+		{"aggregator, pinned, no upstream event", noUpstream, func() *Identity { id := direct(true); id.Serving = "aggregator"; return id }(), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := VerifyReceipt(c.receipt, c.id, []byte(vecRequest), []byte(vecResponse))
+			if (err == nil) != c.ok {
+				t.Fatalf("err = %v, want ok=%v", err, c.ok)
+			}
+		})
+	}
+}

@@ -138,7 +138,7 @@ privateai.Gateway: {
 
 E2EE is always on, and `ComposeHashes` is required: the operator can authorise a new compose for its app at any time, and only the pin keeps its releases to the ones you reviewed.
 
-The gateway's TLS must end inside its TEE, with its key in the attested keyset, as Phala's own gateway does. A gateway behind TLS that ends outside the TEE, such as Phala Cloud's ingress, lists no TLS key and is refused unless you set `AllowTLSOutsideTEE`. With it, E2EE keeps message content from the gateway's operator but not from whoever terminates TLS: E2EE v2 does not bind the client's key, so that party can resend a request with its own key within the replay window and read the answer. `Evidence.TLSPinned` tells which case applied.
+The gateway's TLS must end inside its TEE, with its key in the attested keyset, as Phala's own gateway does. A gateway behind TLS that ends outside the TEE, such as Phala Cloud's ingress, lists no TLS key and is refused unless you set `AllowTLSOutsideTEE`. With it, E2EE keeps message content from the gateway's operator but not from whoever terminates TLS: E2EE v2 does not bind the client's key, so that party can resend a request with its own key within the replay window and read the answer. That party could also rewrite the parts of the attestation report the TEE does not sign, so in this mode every receipt must show a verified upstream TEE session, whatever serving mode the gateway reports. `Evidence.TLSPinned` tells which case applied.
 
 ## What `Verified` records
 

@@ -100,9 +100,13 @@ type Identity struct {
 	AppID       string
 	OSImageHash string
 	TCBStatus   string
-	Serving     string
-	RepoURL     string
-	RepoCommit  string
+	// Serving is the serving mode the report states ("direct" or
+	// "aggregator"). It is outside the attested keyset, so VerifyReceipt
+	// trusts it only with TLSPins, when the report came over an attested
+	// TLS key: then a direct service's receipts need no upstream session.
+	Serving    string
+	RepoURL    string
+	RepoCommit string
 }
 
 // Verifier establishes service identities from attestation reports.
@@ -114,8 +118,12 @@ type Verifier struct {
 	// key.
 	E2EE bool
 	// UnpinnedTLS, with E2EE, accepts a keyset that lists no TLS key for the
-	// host: the service's TLS ends outside its TEE, and the E2EE key binds
-	// the channel instead (spec §9.2).
+	// host: the service's TLS ends outside its TEE. E2EE then keeps message
+	// content from the service's operator, but not from whoever terminates
+	// TLS: E2EE v2 does not bind the client's key, so that party can resend
+	// a request with its own key within the replay window and read the
+	// answer. It can also rewrite the report's service_capabilities, so
+	// receipts then always need a verified upstream session.
 	UnpinnedTLS bool
 }
 

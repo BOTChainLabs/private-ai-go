@@ -120,7 +120,9 @@ type GatewayIdentity struct {
 	// key, so that party can resend a request with its own key within the
 	// replay window and read the answer. Leave it false unless you trust the
 	// TLS terminator; a gateway that terminates TLS inside its TEE needs no
-	// such trust.
+	// such trust. The serving mode the gateway reports is outside its
+	// attestation and is then ignored: every receipt must show a verified
+	// upstream TEE session, so a gateway in direct mode is refused.
 	AllowTLSOutsideTEE bool
 }
 

@@ -2,6 +2,7 @@ package phala
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -56,6 +57,9 @@ type fakeGateway struct {
 	futureSuite     bool              // keyset lists an E2EE suite of unknown shape first (call rotate after)
 	plainResponse   bool              // answers an E2EE request in plaintext
 	mrConfig        []byte            // the quote's MRCONFIGID; nil is version 1 of appCompose
+	serving         string            // service_capabilities.serving; empty is "aggregator"
+	versions        []string          // service_capabilities.supported_e2ee_versions; nil follows e2ee
+	upstream        string            // the receipt's upstream.verified result; empty is "verified", "none" omits the event
 	lastWire        []byte            // the request body as received
 	receipt404      atomic.Int32
 	attestations    atomic.Int32
@@ -117,6 +121,9 @@ func sseParts(withError bool) [][]byte {
 }
 
 func (g *fakeGateway) e2eeVersions() []string {
+	if g.versions != nil {
+		return g.versions
+	}
 	if g.e2ee == nil {
 		return []string{}
 	}
@@ -241,7 +248,7 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 					"app_compose": g.appCompose,
 				},
 			},
-			"service_capabilities": map[string]any{"serving": "aggregator", "supported_e2ee_versions": g.e2eeVersions()},
+			"service_capabilities": map[string]any{"serving": cmp.Or(g.serving, "aggregator"), "supported_e2ee_versions": g.e2eeVersions()},
 		})
 
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
@@ -301,15 +308,16 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		if g.receiptDigest != "" {
 			named = g.receiptDigest
 		}
+		events := []any{map[string]any{"type": "request.received", "body_hash": BodyHash(req)}}
+		if g.upstream != "none" {
+			events = append(events, map[string]any{"type": "upstream.verified", "result": cmp.Or(g.upstream, "verified"), "required": !g.notRequired, "model_id": "m", "session_id": strings.Repeat("ab", 32)})
+		}
+		events = append(events, map[string]any{"type": "response.returned", "body_hash": BodyHash(resp)})
 		doc := map[string]any{
 			"api_version": "aci/1", "receipt_id": "rcpt-1", "chat_id": "chatcmpl-1", "model": "m",
 			"workload_keyset_digest": named, "endpoint": "/v1/chat/completions", "method": "POST",
 			"served_at": time.Now().Unix(), "key_id": "k1",
-			"event_log": []any{
-				map[string]any{"type": "request.received", "body_hash": BodyHash(req)},
-				map[string]any{"type": "upstream.verified", "result": "verified", "required": !g.notRequired, "model_id": "m", "session_id": strings.Repeat("ab", 32)},
-				map[string]any{"type": "response.returned", "body_hash": BodyHash(resp)},
-			},
+			"event_log": events,
 		}
 		raw, _ := json.Marshal(doc)
 		signed, _ := canon.Canonicalize(raw)

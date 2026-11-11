@@ -81,9 +81,8 @@ func TestE2EEStreamVerified(t *testing.T) {
 	}
 }
 
-// Behind a TLS terminator the keyset lists no TLS key: the attested E2EE
-// key binds the channel, which is accepted only when asked for (Gateway),
-// and only with E2EE.
+// Behind a TLS terminator the keyset lists no TLS key: that is accepted
+// only when asked for (Gateway), and only with E2EE.
 func TestE2EEBindsChannelWithoutTLSKey(t *testing.T) {
 	g := newE2EEGateway(t)
 	g.noTLSKey = true
@@ -213,5 +212,62 @@ func TestE2EEHeadersSent(t *testing.T) {
 	}
 	if seen.Get("X-E2EE-Version") != "2" || seen.Get("X-Model-Pub-Key") != g.e2ee.PublicHex() || seen.Get("X-Signing-Algo") != "" {
 		t.Fatalf("headers %v", seen)
+	}
+}
+
+// service_capabilities is outside the attested keyset. Behind TLS that ends
+// outside the TEE, whoever terminates it can rewrite it, so a reported
+// "direct" must not waive the receipt's verified upstream session.
+func TestUnpinnedIgnoresReportedServing(t *testing.T) {
+	unpinned := func(o *Options) { o.UnpinnedTLS = true }
+	for _, upstream := range []string{"failed", "none"} {
+		t.Run(upstream, func(t *testing.T) {
+			g := newE2EEGateway(t)
+			g.noTLSKey = true
+			g.serving = "direct"
+			g.upstream = upstream
+			g.rotate(0x07)
+			_, err := g.provider(t, withE2EE, unpinned).Infer(context.Background(), secretReq)
+			assertCode(t, err, core.CodeReceiptInvalid)
+		})
+	}
+}
+
+// Over a pinned TLS key the report comes from the TEE: a direct service's
+// receipts carry no upstream event. One that records upstream attempts must
+// still show a verified one, as Phala's verifier requires.
+func TestPinnedDirectServing(t *testing.T) {
+	g := newE2EEGateway(t)
+	g.serving = "direct"
+	g.upstream = "none"
+	if _, err := g.provider(t, withE2EE).Infer(context.Background(), secretReq); err != nil {
+		t.Fatal(err)
+	}
+	g.upstream = "failed"
+	_, err := g.provider(t, withE2EE).Infer(context.Background(), secretReq)
+	assertCode(t, err, core.CodeReceiptInvalid)
+}
+
+// supported_e2ee_versions is outside the attested keyset as well, but it is
+// only ever a reason to refuse: content is encrypted to the keyset's
+// attested key, or not sent. A rewritten list cannot make the SDK send
+// without that key.
+func TestUnpinnedE2EEVersionsCannotRelax(t *testing.T) {
+	unpinned := func(o *Options) { o.UnpinnedTLS = true }
+	g := newFakeGateway(t) // its keyset lists no E2EE key
+	g.noTLSKey = true
+	g.versions = []string{"2"}
+	g.rotate(0x07)
+	_, err := g.provider(t, withE2EE, unpinned).Infer(context.Background(), secretReq)
+	assertCode(t, err, core.CodeAttestationFailed)
+
+	h := newE2EEGateway(t)
+	h.noTLSKey = true
+	h.versions = []string{}
+	h.rotate(0x07)
+	_, err = h.provider(t, withE2EE, unpinned).Infer(context.Background(), secretReq)
+	assertCode(t, err, core.CodeAttestationFailed)
+	if n := g.chats.Load() + h.chats.Load(); n != 0 {
+		t.Fatalf("%d requests sent", n)
 	}
 }

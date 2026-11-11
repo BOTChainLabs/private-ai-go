@@ -46,9 +46,13 @@ type Options struct {
 	// and decrypts the generated content, on top of the pinned TLS channel.
 	E2EE bool
 	// UnpinnedTLS, with E2EE, accepts a gateway whose TLS ends outside its
-	// TEE, such as at a cloud load balancer: its keyset lists no TLS key for
-	// the host, and the attested E2EE key binds the channel instead. The API
-	// key and the other parameters are then protected by ordinary TLS only.
+	// TEE, such as at a cloud load balancer, so that its keyset lists no TLS
+	// key for the host. Whoever terminates TLS is then trusted: E2EE keeps
+	// message content from the gateway's operator, but E2EE v2 does not bind
+	// the client's key, so the TLS terminator can resend a request with its
+	// own key within the replay window and read the answer. The API key and
+	// the other parameters are protected by ordinary TLS only, and the
+	// serving mode the report states is ignored (see Identity.Serving).
 	UnpinnedTLS bool
 	// QuoteVerifier defaults to DefaultQuoteVerifier.
 	QuoteVerifier QuoteVerifier
@@ -285,8 +289,10 @@ func (p *Provider) attest(ctx context.Context) (*session, error) {
 		return nil, core.Wrap(noCaller, core.CodeAttestationFailed, err, "verify attestation report")
 	}
 	// The report itself must have arrived over an attested TLS key. Without
-	// one, which the verifier allows only with E2EE, the attested E2EE key
-	// binds the channel instead.
+	// one, which the verifier allows only with E2EE and UnpinnedTLS, the
+	// report came through whoever terminates TLS: content is still encrypted
+	// to the attested E2EE key, but the report's unattested fields are not
+	// trusted (see Identity.Serving).
 	if len(id.TLSPins) > 0 && !peerPinned(resp.TLS, id.TLSPins) {
 		return nil, core.Errorf(core.CodeTLSPinMismatch, ErrTLSPinMismatch, "attestation was served over a TLS key the keyset does not list")
 	}
