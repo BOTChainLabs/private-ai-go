@@ -104,6 +104,9 @@ func (id *identity) gate(verify nearai.QuoteVerifier, r role) nearai.QuoteVerifi
 // knows reports whether an unexpired identity has established a machine
 // with rtmr3 in r.
 func (id *identity) knows(r role, rtmr3 []byte) bool {
+	if len(rtmr3) != 48 {
+		return false
+	}
 	h := hex.EncodeToString(rtmr3)
 	id.mu.Lock()
 	defer id.mu.Unlock()
@@ -253,11 +256,12 @@ func (id *identity) establish(ctx context.Context, model string) (*established, 
 	return e, nil
 }
 
-// rtmr3Of is the hex RTMR3 of a report checkApp has accepted.
+// rtmr3Of is the hex RTMR3 of a report checkApp has accepted, which parsed
+// the same quote. An empty result never matches (knows).
 func rtmr3Of(a nearai.Attestation) string {
 	m, err := tdx.ParseHexQuote(a.IntelQuote)
 	if err != nil {
-		return "" // not reached: checkApp parsed the same quote
+		return ""
 	}
 	return hex.EncodeToString(m.RTMR3)
 }

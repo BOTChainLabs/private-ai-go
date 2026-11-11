@@ -246,8 +246,9 @@ func (p *Provider) checkIdentity(ctx, callerCtx context.Context, model string) (
 		sess, err := p.c.Verify(ctx, model)
 		switch {
 		case err == nil:
-			// Implied by the session's verification; kept as a check of
-			// the keys themselves.
+			// The session's machines passed the gate, which accepts those
+			// established for any model; its keys must also be the ones
+			// established for this model.
 			if err = e.checkSession(sess); err == nil {
 				return e, nil
 			}
@@ -255,6 +256,9 @@ func (p *Provider) checkIdentity(ctx, callerCtx context.Context, model string) (
 			return nil, core.Wrap(callerCtx, codeFor(err), detailed(err), "attest NEAR session")
 		}
 		if round == learnRounds {
+			if errors.Is(err, errUnestablished) {
+				err = fmt.Errorf("%w: NEAR's SDK chose a machine the identity check did not establish", err)
+			}
 			return nil, core.Errorf(core.CodeAttestationFailed, err, "NEAR session")
 		}
 		if e, err = p.ident.refresh(ctx, model); err != nil {

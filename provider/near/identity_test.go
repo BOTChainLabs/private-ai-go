@@ -341,6 +341,9 @@ func TestSessionsAreHeldToTheIdentity(t *testing.T) {
 	if ident.knows(roleModel, gq.RTMR3) || ident.knows(roleGateway, mq.RTMR3) {
 		t.Fatal("roles mixed")
 	}
+	if ident.knows(roleModel, nil) || ident.knows(roleModel, mq.RTMR3[:32]) {
+		t.Fatal("a malformed RTMR3 matched")
+	}
 	// Once the identity is older than identityMaxAge, sessions are refused
 	// until it is established again.
 	ident.now = func() time.Time { return time.Now().Add(identityMaxAge + time.Minute) }
