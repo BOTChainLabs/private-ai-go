@@ -20,13 +20,90 @@ func newTestServer(t *testing.T) http.Handler {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { client.Close() })
-	return withHeaders((&server{client: client}).routes())
+	return handler(client, "", true)
 }
 
-func do(h http.Handler, method, path, body string) *httptest.ResponseRecorder {
+// do sends a request as the page itself does: to the address it was opened
+// at, and for a POST with JSON from the same origin.
+func do(h http.Handler, method, path, body string, header ...string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.Host = "127.0.0.1:8080"
+	if method == http.MethodPost {
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Origin", "http://127.0.0.1:8080")
+		r.Header.Set("Sec-Fetch-Site", "same-origin")
+	}
+	for i := 0; i+1 < len(header); i += 2 {
+		if header[i] == "Host" {
+			r.Host = header[i+1]
+		} else {
+			r.Header.Set(header[i], header[i+1])
+		}
+	}
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest(method, path, strings.NewReader(body)))
+	h.ServeHTTP(w, r)
 	return w
+}
+
+// Beyond localhost the demo needs both a password and TLS: basic auth over
+// plain HTTP would send the password, and the answers, in clear.
+func TestListenPolicy(t *testing.T) {
+	cases := []struct {
+		addr, password, cert, key string
+		ok                        bool
+	}{
+		{"127.0.0.1:8080", "", "", "", true},
+		{"localhost:8080", "", "", "", true},
+		{"0.0.0.0:8443", "pw", "cert.pem", "key.pem", true},
+		{"0.0.0.0:8080", "", "", "", false},
+		{"0.0.0.0:8080", "pw", "", "", false},
+		{"0.0.0.0:8443", "", "cert.pem", "key.pem", false},
+		{":8443", "pw", "cert.pem", "", false},
+	}
+	for _, c := range cases {
+		if err := checkListen(c.addr, c.password, c.cert, c.key); (err == nil) != c.ok {
+			t.Errorf("checkListen(%q, password %t, cert %q, key %q) = %v", c.addr, c.password != "", c.cert, c.key, err)
+		}
+	}
+}
+
+// A page on another site can make a browser send a simple POST to
+// 127.0.0.1 (CSRF), spending the keys' credits; one served from a domain
+// that resolves to 127.0.0.1 (DNS rebinding) can also read the answer.
+// Neither reaches the API.
+func TestBrowserAttacksRefused(t *testing.T) {
+	h := newTestServer(t)
+	body := `{"provider":"phala","model":"openai/gpt-5","messages":[{"role":"user","content":"x"}]}`
+	cases := []struct {
+		name   string
+		method string
+		header []string
+		want   int
+	}{
+		{"form-encoded POST", "POST", []string{"Content-Type", "text/plain"}, http.StatusUnsupportedMediaType},
+		{"cross-site POST", "POST", []string{"Origin", "https://evil.example", "Sec-Fetch-Site", "cross-site"}, http.StatusForbidden},
+		{"cross-site POST, Origin only", "POST", []string{"Origin", "https://evil.example", "Sec-Fetch-Site", ""}, http.StatusForbidden},
+		{"rebound host, models", "GET", []string{"Host", "evil.example:8080"}, http.StatusForbidden},
+		{"rebound host, chat", "POST", []string{"Host", "evil.example:8080", "Origin", "http://evil.example:8080"}, http.StatusForbidden},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := "/api/chat"
+			if c.method == "GET" {
+				path = "/api/models"
+			}
+			if w := do(h, c.method, path, body, c.header...); w.Code != c.want {
+				t.Fatalf("%d %s, want %d", w.Code, w.Body, c.want)
+			}
+		})
+	}
+	// The page itself, at any loopback address, still works.
+	for _, host := range []string{"127.0.0.1:8080", "localhost:8080", "[::1]:8080"} {
+		w := do(h, "POST", "/api/chat", body, "Host", host, "Origin", "http://"+host)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "MODEL_NOT_ALLOWED") {
+			t.Fatalf("%s: %d %s", host, w.Code, w.Body)
+		}
+	}
 }
 
 func TestModelsListsChecks(t *testing.T) {

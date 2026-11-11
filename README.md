@@ -172,7 +172,7 @@ NEARAI_API_KEY=... go run ./examples/demo -provider near -stream "Say hi"
 PHALA_API_KEY=... NEARAI_API_KEY=... go run ./examples/web              # chat page on http://127.0.0.1:8080
 ```
 
-The chat page shows each answer next to its proof: the checks it passed, the evidence, and a downloadable proof file. A streamed Phala answer is marked unverified until its receipt checks out; NEAR answers arrive in one piece, already verified. The page listens on localhost and refuses to listen elsewhere without `DEMO_PASSWORD` (HTTP basic auth), since every message spends the keys' credits.
+The chat page shows each answer next to its proof: the checks it passed, the evidence, and a downloadable proof file. A streamed Phala answer is marked unverified until its receipt checks out; NEAR answers arrive in one piece, already verified. The page listens on localhost and answers only requests addressed to localhost, and its API refuses cross-site requests, so other web pages cannot use it. Every message spends the keys' credits, so to serve other machines it needs both `DEMO_PASSWORD` (HTTP basic auth) and TLS (`-addr :8443 -tls-cert cert.pem -tls-key key.pem`).
 
 ## Deployment requirements
 
