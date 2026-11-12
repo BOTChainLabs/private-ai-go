@@ -29,7 +29,8 @@ type Workload struct {
 const nearKMS = "7b226e616d65223a226b6d73222c226964223a223330353933303133303630373261383634386365336430323031303630383261383634386365336430333031303730333432303030343339346161656432633734356536613435376362383335663766343734323366353766663365616437316239326162666636626463313464393035623331396632653133393631623432633530373430646165343439386439633531646437613265323237363630633965356335303430383363646130366236633131363832227d"
 
 // ProductionWorkload is NEAR AI Cloud's gateway and model deployment, as
-// attested on 2026-10-21. NEAR's own models run as one app (seen for
+// attested on 2026-10-21, with the gateway's dstack-0.5.12 upgrade seen on
+// 2026-11-12 (TestLiveObserve prints what to add after such an upgrade). NEAR's own models run as one app (seen for
 // z-ai/glm-5.3-flash, Qwen/Qwen3.6-35B-A3B-FP8, Qwen/Qwen3.8-27B and
 // Qwen/Qwen3-VL-30B-A3B-Instruct); models NEAR routes to third parties
 // publish no attestation and are refused. A model served as a new app, or a
@@ -38,11 +39,20 @@ const nearKMS = "7b226e616d65223a226b6d73222c226964223a2233303539333031333036303
 func ProductionWorkload() Workload {
 	return Workload{
 		OS: []tdx.OSMeasurement{
-			{ // gateway
+			{ // gateway (kept while replicas may still run it)
 				MRTD:  "f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077",
 				RTMR0: "fb14dc139f33d6fcf474bc8332cac001259fb31cfbcb6b34d4ceeb552a2c4466884a0cbde45ad98a05c5c060c23ad65a",
 				RTMR1: "a7b523278d4f914ee8df0ec80cd1c3d498cbf1152b0c5eaf65bad9425072874a3fcf891e8b01713d3d9937e3e0d26c15",
 				RTMR2: "24847f5c5a2360d030bc4f7b8577ce32e87c4d051452c937e91220cab69542daef83433947c492b9c201182fc9769bbe",
+			},
+			{ // gateway after NEAR's upgrade, seen 2026-11-12: dstack OS image 8db40cb2…, the
+				// production dstack-0.5.12 image of Dstack-TEE/meta-dstack's v0.5.12 release
+				// (the model VMs run its dstack-nvidia-0.5.12 image, 91fd5d69…, same kernel: RTMR1).
+				// Observed by TestLiveObserve on NEAR's gateway app under NEAR's KMS, DCAP-verified.
+				MRTD:  "7fe60787222bd394cb516abca2435f22f035ab2cc9c0a4b4b3b148e46297f3d931a237b72f359052c6e657d8c1409173",
+				RTMR0: "d090162bff4b1d1dc74dc59dc548838efc4b811b173da8536efa8e2a9c045da70ee092301293ad90afebee448bcd0211",
+				RTMR1: "4ae609807c765916a31d724786ed74bcb97e168a9d937b04936aeef2015c907eba5ac352c6bcd749c246fd62ffb659ec",
+				RTMR2: "764489f277a8540189761e72b4238ba36d4d647e11bd958d8ab5522af2a4867b0ff63e06b0c4967f1857236244040a5d",
 			},
 			{ // model VMs, dstack OS image a6eafc5f…
 				MRTD:  "df4d77c857de652bd0fafa343a2026b51071ee03773d076d283abf1a7d36ff91ffa279ee4a617ac664f7e2a2c8d5891b",

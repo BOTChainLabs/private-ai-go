@@ -13,6 +13,7 @@ All notable changes to this SDK are documented here.
 - Interop and cross-check tools: `tools/gatewaycheck` runs E2EE against the real gateway; `tools/serdecheck` compares the SDK's JSON with serde_json.
 - Phala's gateway moved on 2026-11-06 to a new app (`89c51ab8…`), KMS and dstack OS 0.5.12; `phala.ProductionWorkload` accepts it beside the old deployment, which v0.1.0 alone accepts, so v0.1.0 fails to verify `inference.phala.com`.
 - Self-hosted gateways default to Phala Cloud's KMS (`phala.CloudKeyProviders`), not to every KMS of Phala's own gateway.
+- NEAR's gateway moved to dstack OS 0.5.12 (seen 2026-11-12; `os_image_hash` 8db40cb2…, the production image of meta-dstack's v0.5.12 release, whose NVIDIA image its model VMs already ran): `near.ProductionWorkload` accepts its build beside the earlier one, which alone the SDK accepted before, so NEAR calls failed with "unknown OS build". `TestLiveObserve` (`NEAR_OBSERVE=1`) prints, after full verification, what to pin after such an upgrade.
 
 Security review fixes:
 
