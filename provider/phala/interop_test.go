@@ -96,6 +96,14 @@ func TestGatewayInterop(t *testing.T) {
 			if rr.ReceiptID != rid {
 				t.Fatalf("X-Receipt-Id %q, receipt_id %q", rid, rr.ReceiptID)
 			}
+			// Reached without a pinned TLS key, the same direct gateway's
+			// receipt is refused: its serving mode is then not trusted, and the
+			// receipt records no upstream TEE session.
+			unpinned := *id
+			unpinned.TLSPins = nil
+			if _, err := VerifyReceipt(raw, &unpinned, hashed, respBody); err == nil {
+				t.Fatal("a direct gateway's receipt was accepted without a pinned TLS key")
+			}
 
 			// And the answer decrypts.
 			var content strings.Builder
@@ -231,7 +239,13 @@ func interopIdentity(t *testing.T, gw string) (*Identity, string) {
 	if key == "" {
 		t.Fatal("gateway publishes no X25519 key")
 	}
-	return &Identity{KeysetDigest: digest, Keyset: ks, Serving: rep.ServiceCapabilities.Serving}, key
+	// The report came over plain HTTP from the simulator; in production a
+	// direct gateway's report arrives over a TLS key its keyset lists, which
+	// is what lets VerifyReceipt trust its serving mode. That channel is not
+	// what this test checks (provider_test.go does), so the identity is taken
+	// as reached over a pinned key.
+	return &Identity{KeysetDigest: digest, Keyset: ks, Serving: rep.ServiceCapabilities.Serving,
+		TLSPins: []string{"interop: the report's channel is not part of this test"}}, key
 }
 
 func fetch(t *testing.T, u string) []byte {
