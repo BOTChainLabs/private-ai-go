@@ -1,6 +1,10 @@
 // Package phala verifies and calls Phala's confidential inference gateway
-// under the ACI spec (aci/1):
+// under the ACI spec (aci/1), optionally with E2EE v2:
 // https://github.com/Dstack-TEE/private-ai-gateway/blob/main/spec/aci.md
+//
+// Phala's gateway is the open-source Private AI Gateway, so the same
+// provider also verifies a self-hosted deployment of it (core.Gateway)
+// against that deployment's own workload identity.
 package phala
 
 import (
@@ -16,6 +20,7 @@ import (
 
 	"github.com/BOTChainLabs/private-ai-go/core"
 	"github.com/BOTChainLabs/private-ai-go/internal/canon"
+	"github.com/BOTChainLabs/private-ai-go/internal/e2ee"
 	"github.com/BOTChainLabs/private-ai-go/internal/tdx"
 )
 
@@ -46,7 +51,8 @@ type Report struct {
 		} `json:"evidence"`
 	} `json:"attestation"`
 	ServiceCapabilities struct {
-		Serving string `json:"serving"`
+		Serving               string   `json:"serving"`
+		SupportedE2EEVersions []string `json:"supported_e2ee_versions"`
 	} `json:"service_capabilities"`
 }
 
@@ -55,10 +61,13 @@ type Keyset struct {
 	Subject            *string    `json:"subject"`
 	NotAfter           int64      `json:"not_after"`
 	ReceiptSigningKeys []KeyEntry `json:"receipt_signing_keys"`
-	TLSPublicKeys      []TLSKey   `json:"tls_public_keys"`
+	// E2EEPublicKeys stay raw: a suite this SDK does not know may shape
+	// its entry differently, and must not break verification (spec §3.1).
+	E2EEPublicKeys []json.RawMessage `json:"e2ee_public_keys"`
+	TLSPublicKeys  []TLSKey          `json:"tls_public_keys"`
 }
 
-// KeyEntry is a receipt signing key in the keyset.
+// KeyEntry is a receipt signing or E2EE key in the keyset.
 type KeyEntry struct {
 	KeyID     string `json:"key_id"`
 	Algo      string `json:"algo"`
@@ -81,15 +90,25 @@ type Identity struct {
 	KeysetJSON json.RawMessage
 	NotAfter   time.Time
 	// TLSPins are the hex SHA-256 SPKI digests the keyset allows for the
-	// host. More than one can be listed while a TLS key rotates.
-	TLSPins     []string
+	// host. More than one can be listed while a TLS key rotates. Empty only
+	// with E2EE, when the gateway's TLS ends outside its TEE.
+	TLSPins []string
+	// E2EEKey is the attested X25519 key content is encrypted to, when the
+	// verifier requires E2EE.
+	E2EEKey     string
 	ComposeHash string
 	AppID       string
 	OSImageHash string
 	TCBStatus   string
-	Serving     string
-	RepoURL     string
-	RepoCommit  string
+	// AdvisoryIDs are the Intel advisories the TCB status refers to.
+	AdvisoryIDs []string
+	// Serving is the serving mode the report states ("direct" or
+	// "aggregator"). It is outside the attested keyset, so VerifyReceipt
+	// trusts it only with TLSPins, when the report came over an attested
+	// TLS key: then a direct service's receipts need no upstream session.
+	Serving    string
+	RepoURL    string
+	RepoCommit string
 }
 
 // Verifier establishes service identities from attestation reports.
@@ -97,6 +116,17 @@ type Verifier struct {
 	Quote    QuoteVerifier
 	Workload Workload
 	Policy   core.Policy
+	// E2EE requires the service to terminate E2EE v2 with an attested X25519
+	// key.
+	E2EE bool
+	// UnpinnedTLS, with E2EE, accepts a keyset that lists no TLS key for the
+	// host: the service's TLS ends outside its TEE. E2EE then keeps message
+	// content from the service's operator, but not from whoever terminates
+	// TLS: E2EE v2 does not bind the client's key, so that party can resend
+	// a request with its own key within the replay window and read the
+	// answer. It can also rewrite the report's service_capabilities, so
+	// receipts then always need a verified upstream session.
+	UnpinnedTLS bool
 }
 
 // KeysetDigest computes "sha256:" + hex(sha256(JCS(keyset))) (spec §3.1).
@@ -169,7 +199,7 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 		return nil, fmt.Errorf("quote comes from a debug TD")
 	}
 	if !v.Policy.AcceptsTCB(q.TCBStatus) {
-		return nil, fmt.Errorf("TCB status %q is not accepted (accepted: %v)", q.TCBStatus, v.Policy.TCBStatuses())
+		return nil, fmt.Errorf("TCB status %q (advisories %v) is not accepted (accepted: %v)", q.TCBStatus, q.AdvisoryIDs, v.Policy.TCBStatuses())
 	}
 	if len(q.ReportData) != 64 || !bytes.Equal(q.ReportData[:32], want[:]) || !bytes.Equal(q.ReportData[32:], make([]byte, 32)) {
 		return nil, fmt.Errorf("quote report_data does not match the attestation statement")
@@ -177,11 +207,14 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 
 	// Which code: the booted compose is bound by MRCONFIGID (set at launch,
 	// not changeable by the guest) and by the measured compose-hash event;
-	// the OS, app and key provider must be the expected workload.
+	// the OS, app and key provider must be the expected workload. Version 1
+	// is the compose hash itself; version 3 (dstack 0.6, apps with a key
+	// provider ID) hashes the compose with the app's identity, which comes
+	// from the event log, so it is checked once the log is replayed.
 	composeSum := sha256.Sum256([]byte(ev.AppCompose))
 	composeHash := hex.EncodeToString(composeSum[:])
-	wantConfig := append(append([]byte{0x01}, composeSum[:]...), make([]byte, 15)...)
-	if !bytes.Equal(q.MRConfigID, wantConfig) {
+	v3 := len(q.MRConfigID) == 48 && q.MRConfigID[0] == 0x03
+	if !v3 && !bytes.Equal(q.MRConfigID, mrConfigV1(composeSum)) {
 		return nil, fmt.Errorf("MRCONFIGID does not bind app_compose")
 	}
 	events, err := tdx.ReplayRTMR3([]byte(ev.EventLog), q.RTMR3)
@@ -190,6 +223,15 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 	}
 	if events["compose-hash"] != composeHash {
 		return nil, fmt.Errorf("measured compose-hash does not match app_compose")
+	}
+	if v3 {
+		ids, err := mrConfigV3IDs(ev.AppCompose, composeHash, events)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.ContainsFunc(ids, func(id []byte) bool { return bytes.Equal(id, q.MRConfigID) }) {
+			return nil, fmt.Errorf("MRCONFIGID v3 does not bind app_compose and the app's identity")
+		}
 	}
 	if err := v.checkWorkload(q, events); err != nil {
 		return nil, err
@@ -223,11 +265,30 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 			pins = append(pins, strings.ToLower(k.SPKISHA256))
 		}
 	}
-	if len(pins) == 0 {
+	if len(pins) == 0 && !(v.E2EE && v.UnpinnedTLS) {
 		return nil, fmt.Errorf("keyset lists no TLS key for %s", host)
 	}
 	if !slices.ContainsFunc(ks.ReceiptSigningKeys, func(k KeyEntry) bool { return k.Algo == "ed25519" }) {
 		return nil, fmt.Errorf("keyset has no ed25519 receipt signing key")
+	}
+	var e2eeKey string
+	if v.E2EE {
+		if !slices.Contains(rep.ServiceCapabilities.SupportedE2EEVersions, e2ee.Version) {
+			return nil, fmt.Errorf("service does not support E2EE v%s (supports %v)", e2ee.Version, rep.ServiceCapabilities.SupportedE2EEVersions)
+		}
+		for _, raw := range ks.E2EEPublicKeys {
+			var k KeyEntry
+			if json.Unmarshal(raw, &k) == nil && k.Algo == e2ee.Algo {
+				e2eeKey = k.PublicKey
+				break
+			}
+		}
+		if e2eeKey == "" {
+			return nil, fmt.Errorf("keyset has no %s key", e2ee.Algo)
+		}
+		if b, err := hex.DecodeString(strings.TrimPrefix(e2eeKey, "0x")); err != nil || len(b) != 32 {
+			return nil, fmt.Errorf("keyset %s key is malformed", e2ee.Algo)
+		}
 	}
 
 	id := &Identity{
@@ -236,10 +297,12 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 		KeysetJSON:   keysetJSON,
 		NotAfter:     notAfter,
 		TLSPins:      pins,
+		E2EEKey:      e2eeKey,
 		ComposeHash:  composeHash,
 		AppID:        events["app-id"],
 		OSImageHash:  events["os-image-hash"],
 		TCBStatus:    q.TCBStatus,
+		AdvisoryIDs:  q.AdvisoryIDs,
 		Serving:      rep.ServiceCapabilities.Serving,
 	}
 	if hasRepo {
@@ -252,10 +315,24 @@ func (v *Verifier) VerifyReport(ctx context.Context, rep *Report, nonce, host st
 // errors carry the observed values, so a new release is easy to recognize.
 func (v *Verifier) checkWorkload(q QuoteResult, events map[string]string) error {
 	w := v.Workload
-	if err := tdx.CheckOS(q.measurements(), w.OS); err != nil {
+	m := q.measurements()
+	if err := tdx.CheckOS(m, w.OS); err != nil {
 		return err
 	}
-	return tdx.App{AppIDs: w.AppIDs, KeyProviders: w.KeyProviders, KMSMeasurements: w.KMSMeasurements}.Check(events)
+	if err := (tdx.App{AppIDs: w.AppIDs, KeyProviders: w.KeyProviders, KMSMeasurements: w.KMSMeasurements}).Check(events); err != nil {
+		return err
+	}
+	if len(w.Deployments) == 0 {
+		return nil
+	}
+	for _, d := range w.Deployments {
+		if d.complete() && tdx.CheckOS(m, d.OS) == nil && (tdx.App{AppIDs: d.AppIDs, KeyProviders: d.KeyProviders}).Check(events) == nil {
+			return nil
+		}
+	}
+	os := tdx.OSOf(m)
+	return fmt.Errorf("app %s with key provider %s on OS build MRTD %s RTMR0 %s RTMR1 %s RTMR2 %s is not an accepted deployment",
+		events["app-id"], events["key-provider"], os.MRTD, os.RTMR0, os.RTMR1, os.RTMR2)
 }
 
 // keysetMembers is the fixed keyset shape (spec §3.1, Appendix B).

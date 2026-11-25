@@ -1,4 +1,4 @@
-.PHONY: help check fmt vet test cover live crosscheck
+.PHONY: help check fmt vet test cover live crosscheck serdecheck interop
 
 .DEFAULT_GOAL := help
 
@@ -28,3 +28,11 @@ live: ## Live checks: Phala preflight (no key), Phala calls (PHALA_API_KEY), NEA
 crosscheck: ## Compare with Phala's official verifier (see tools/crosscheck/README.md; needs W=<workdir>).
 	@test -n "$(W)" || (echo "usage: make crosscheck W=<workdir>" && exit 1)
 	PRIVATEAI_CROSSCHECK_DIR=$(W) $(GO) test -count=1 -run CrossCheck -v ./provider/phala
+
+serdecheck: ## Compare internal/serdejson with Rust's serde_json (needs cargo; see tools/serdecheck/README.md).
+	cargo build --release --manifest-path tools/serdecheck/Cargo.toml
+	SERDECHECK=$(CURDIR)/tools/serdecheck/target/release/serdecheck $(GO) test -count=1 -run CrossCheck -v ./internal/serdejson
+
+interop: ## E2EE against the real gateway on dstack's simulator (needs Docker; see tools/gatewaycheck/README.md).
+	docker compose -f tools/gatewaycheck/compose.yaml up -d --build
+	PRIVATEAI_GATEWAY_INTEROP=http://127.0.0.1:18086 $(GO) test -count=1 -run GatewayInterop -v ./provider/phala

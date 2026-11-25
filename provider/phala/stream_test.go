@@ -108,9 +108,26 @@ func TestStreamReceiptFallsBackToCompletionID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.Evidence.ReceiptID != "chatcmpl-1" {
+	// Evidence records the receipt's own, signed id.
+	if v.Evidence.ReceiptID != "rcpt-1" {
 		t.Fatalf("receipt id %q", v.Evidence.ReceiptID)
 	}
+}
+
+// Looked up by completion id, the receipt must be that completion's.
+func TestStreamReceiptMustBeTheCompletions(t *testing.T) {
+	g := newFakeGateway(t)
+	g.noReceiptHeader = true
+	g.signedChatID = "chatcmpl-other"
+	st, err := g.provider(t).Stream(context.Background(), testReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readAll(t, st); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.Verify(context.Background())
+	assertCode(t, err, core.CodeReceiptInvalid)
 }
 
 func TestStreamErrorEvent(t *testing.T) {

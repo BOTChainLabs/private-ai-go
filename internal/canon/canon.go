@@ -112,7 +112,7 @@ func write(b *bytes.Buffer, v any) error {
 			if i > 0 {
 				b.WriteByte(',')
 			}
-			writeString(b, k)
+			WriteString(b, k)
 			b.WriteByte(':')
 			if err := write(b, t[k]); err != nil {
 				return err
@@ -131,7 +131,7 @@ func write(b *bytes.Buffer, v any) error {
 		}
 		b.WriteByte(']')
 	case string:
-		writeString(b, t)
+		WriteString(b, t)
 	case json.Number:
 		b.WriteString(t.String())
 	case bool:
@@ -144,10 +144,11 @@ func write(b *bytes.Buffer, v any) error {
 	return nil
 }
 
-// writeString escapes like JSON.stringify (RFC 8785 §3.2.2.2): the quote,
+// WriteString escapes like JSON.stringify (RFC 8785 §3.2.2.2): the quote,
 // the backslash and control characters only. encoding/json differs: it
-// always escapes U+2028 and U+2029.
-func writeString(b *bytes.Buffer, s string) {
+// always escapes U+2028 and U+2029. Rust's serde_json escapes exactly the
+// same way.
+func WriteString(b *bytes.Buffer, s string) {
 	const hexDigits = "0123456789abcdef"
 	b.WriteByte('"')
 	for i := 0; i < len(s); i++ {

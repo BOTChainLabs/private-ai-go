@@ -51,31 +51,29 @@ func TestLiveInference(t *testing.T) {
 		saveForCrossCheck(t, req, res)
 	})
 
-	t.Run("stream", func(t *testing.T) {
-		st, err := p.Stream(ctx, req)
+	t.Run("stream", func(t *testing.T) { liveStream(ctx, t, p, req) })
+
+	// Phala's gateway terminates E2EE v2: content travels encrypted to its
+	// attested key, and the receipt covers the decrypted request.
+	ep, err := New(Options{APIKey: key, E2EE: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ep.Close()
+	t.Run("e2ee infer", func(t *testing.T) {
+		res, err := ep.Infer(ctx, req)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer st.Close()
-		var sb strings.Builder
-		for {
-			c, err := st.Recv()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			sb.WriteString(c.Content)
+		if res.Verification.Evidence.E2EE == "" || res.Content == "" {
+			t.Fatalf("result %+v", res)
 		}
-		v, err := st.Verify(ctx)
-		if err != nil {
-			t.Fatal(err)
+		t.Logf("%q (receipt %s, %s)", res.Content, res.Verification.Evidence.ReceiptID, res.Verification.Evidence.E2EE)
+	})
+	t.Run("e2ee stream", func(t *testing.T) {
+		if v := liveStream(ctx, t, ep, req); v.Evidence.E2EE == "" {
+			t.Fatalf("verification %+v", v)
 		}
-		if v.Status != core.Verified || st.Usage().TotalTokens == 0 {
-			t.Fatalf("verification %+v, usage %+v", v, st.Usage())
-		}
-		t.Logf("%q (receipt %s)", sb.String(), v.Evidence.ReceiptID)
 	})
 
 	t.Run("non-TEE model refused", func(t *testing.T) {
@@ -86,6 +84,35 @@ func TestLiveInference(t *testing.T) {
 		}
 		t.Logf("refused as expected: %v", err)
 	})
+}
+
+func liveStream(ctx context.Context, t *testing.T, p *Provider, req core.InferRequest) *core.Verification {
+	t.Helper()
+	st, err := p.Stream(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var sb strings.Builder
+	for {
+		c, err := st.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		sb.WriteString(c.Content)
+	}
+	v, err := st.Verify(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Status != core.Verified || st.Usage().TotalTokens == 0 || sb.Len() == 0 {
+		t.Fatalf("verification %+v, usage %+v, content %q", v, st.Usage(), sb.String())
+	}
+	t.Logf("%q (receipt %s)", sb.String(), v.Evidence.ReceiptID)
+	return v
 }
 
 // saveForCrossCheck writes a real receipt and the exact bytes it covers to

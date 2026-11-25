@@ -20,6 +20,7 @@ Requires Go 1.26 or later.
 | --- | --- | --- | --- |
 | Phala | `inference.phala.com` (ACI `aci/1`) | Intel TDX attestation, workload identity (dstack OS build, gateway app, KMS), TLS key pinning | Ed25519 receipt over the exact request and response bytes, attested upstream TEE session |
 | NEAR AI | `cloud-api.near.ai` | Intel TDX and NVIDIA GPU attestation, workload identity (dstack OS builds, gateway and model apps, KMS), TLS key pinning, request end-to-end encrypted to the model | Signature by the attested model over the exact bytes |
+| Gateway | Your deployment of the open-source [Private AI Gateway](https://github.com/Dstack-TEE/private-ai-gateway), the gateway Phala runs | As for Phala, against the identity you configure; content end-to-end encrypted to the gateway | As for Phala |
 
 You bring your own provider API key and the provider bills you directly. The SDK never stores or logs API keys, and prompts go straight to the provider.
 
@@ -84,9 +85,11 @@ if _, err := st.Verify(ctx); err != nil {
 
 NEAR signs streamed responses with its gateway key only, which does not prove the model produced them. For NEAR, `Stream` therefore makes one verified call and returns it as a single chunk.
 
+`Config.Timeout` (default 2 minutes) bounds each `Infer` call as a whole, attestation and verification included. For a stream it bounds opening it and `Verify`, but not reading it: only your context bounds a long answer.
+
 ## Policy
 
-By default only machines with Intel TCB status `UpToDate` or `OutOfDate` are accepted. Tighten it per provider:
+By default machines with Intel TCB status `UpToDate` or `OutOfDate` are accepted. `OutOfDate` means the platform lacks the fixes of the Intel advisories that `Evidence.AdvisoryIDs` lists. It is accepted because providers run behind Intel's TCB recoveries (NEAR AI's gateway was `OutOfDate` on 2026-11-11), and refusing it would stop every call to them until they patch. Tighten it per provider:
 
 ```go
 privateai.Phala: {
@@ -98,7 +101,7 @@ privateai.Phala: {
 },
 ```
 
-The production identities of Phala and NEAR AI (OS builds, apps, KMS) are built in. Providers' regular releases need no change. When a provider upgrades its OS, or NEAR AI serves a model as a new app, verification fails safely and the error shows the new values. Once the provider confirms them, add them until an SDK release includes them:
+The production identities of Phala and NEAR AI (OS builds, apps, KMS) are built in; each of Phala's deployments is accepted only with its own app, KMS and OS build. Providers' regular releases need no change. When a provider upgrades its OS, or NEAR AI serves a model as a new app, verification fails safely and the error shows the new values. Once the provider confirms them, add them until an SDK release includes them:
 
 ```go
 privateai.NEAR: {
@@ -108,9 +111,40 @@ privateai.NEAR: {
 },
 ```
 
+## End-to-end encryption
+
+Phala's gateway also terminates E2EE v2 ([spec](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/spec/e2ee-v2.md)). With `E2EE: true`, message content is encrypted to the gateway's attested key, and the answer comes back encrypted to a fresh key of each request:
+
+```go
+privateai.Phala: {APIKey: os.Getenv("PHALA_API_KEY"), E2EE: true},
+```
+
+The receipt still covers the request exactly: the SDK predicts the bytes the gateway hashes after decrypting it. Only content is encrypted: message content, and the answer's content and reasoning. Everything else travels over the pinned TLS channel only, including the API key, parameters such as `tools` and `response_format`, and tool calls, refusals and logprobs in the answer. `Evidence.E2EE` names the suite used. NEAR AI always uses its own E2EE.
+
+## Self-hosted gateway
+
+`privateai.Gateway` verifies someone else's deployment of the Private AI Gateway, such as the BotChain AI Gateway, against the identity its operator publishes:
+
+```go
+privateai.Gateway: {
+    APIKey:  os.Getenv("GATEWAY_API_KEY"),
+    BaseURL: "https://gateway.example.com",
+    Identity: &privateai.GatewayIdentity{
+        AppIDs:        []string{"..."}, // the deployment's dstack app ID
+        OS:            []privateai.OSMeasurement{{MRTD: "...", RTMR0: "...", RTMR1: "...", RTMR2: "..."}},
+        ComposeHashes: []string{"..."}, // the releases the operator published
+        // KeyProviders defaults to Phala Cloud's KMS.
+    },
+},
+```
+
+E2EE is always on, and `ComposeHashes` is required: the operator can authorise a new compose for its app at any time, and only the pin keeps its releases to the ones you reviewed.
+
+The gateway's TLS must end inside its TEE, with its key in the attested keyset, as Phala's own gateway does. A gateway behind TLS that ends outside the TEE, such as Phala Cloud's ingress, lists no TLS key and is refused unless you set `AllowTLSOutsideTEE`. With it, E2EE keeps message content from the gateway's operator but not from whoever terminates TLS: E2EE v2 does not bind the client's key, so that party can resend a request with its own key within the replay window and read the answer. That party could also rewrite the parts of the attestation report the TEE does not sign, so in this mode every receipt must show a verified upstream TEE session, whatever serving mode the gateway reports. `Evidence.TLSPinned` tells which case applied.
+
 ## What `Verified` records
 
-`res.Verification.Evidence` holds what the result was checked against: the provider app, OS image and compose hashes, the TCB status and the signed receipt or signature, ready to archive.
+`res.Verification.Evidence` holds what the result was checked against: the provider app, OS image and compose hashes, the TCB status with the Intel advisories it refers to, and the signed receipt or signature, ready to archive.
 
 ## Errors
 
@@ -138,7 +172,7 @@ NEARAI_API_KEY=... go run ./examples/demo -provider near -stream "Say hi"
 PHALA_API_KEY=... NEARAI_API_KEY=... go run ./examples/web              # chat page on http://127.0.0.1:8080
 ```
 
-The chat page shows each answer next to its proof: the checks it passed, the evidence, and a downloadable proof file. A streamed Phala answer is marked unverified until its receipt checks out; NEAR answers arrive in one piece, already verified. The page listens on localhost and refuses to listen elsewhere without `DEMO_PASSWORD` (HTTP basic auth), since every message spends the keys' credits.
+The chat page shows each answer next to its proof: the checks it passed, the evidence, and a downloadable proof file. A streamed Phala answer is marked unverified until its receipt checks out; NEAR answers arrive in one piece, already verified. The page listens on localhost and answers only requests addressed to localhost, and its API refuses cross-site requests, so other web pages cannot use it. Every message spends the keys' credits, so to serve other machines it needs both `DEMO_PASSWORD` (HTTP basic auth) and TLS (`-addr :8443 -tls-cert cert.pem -tls-key key.pem`).
 
 ## Deployment requirements
 
@@ -158,7 +192,7 @@ PHALA_API_KEY=... go test ./provider/phala -run LiveInference -v
 NEARAI_API_KEY=... go test ./provider/near -run Live -v
 ```
 
-The Phala verification is cross-checked against Phala's official TypeScript verifier with [tools/crosscheck](tools/crosscheck/README.md).
+The Phala verification is cross-checked against Phala's official TypeScript verifier with [tools/crosscheck](tools/crosscheck/README.md). E2EE is checked against the real gateway with [tools/gatewaycheck](tools/gatewaycheck/README.md) (`make interop`, Docker), and its JSON against Rust's serde_json with [tools/serdecheck](tools/serdecheck/README.md) (`make serdecheck`).
 
 ## License
 

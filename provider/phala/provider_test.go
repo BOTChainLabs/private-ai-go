@@ -2,6 +2,7 @@ package phala
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +24,8 @@ import (
 
 	"github.com/BOTChainLabs/private-ai-go/core"
 	"github.com/BOTChainLabs/private-ai-go/internal/canon"
+	"github.com/BOTChainLabs/private-ai-go/internal/e2ee"
+	"github.com/BOTChainLabs/private-ai-go/internal/e2ee/e2eetest"
 	"github.com/BOTChainLabs/private-ai-go/internal/tdx"
 )
 
@@ -48,7 +52,24 @@ type fakeGateway struct {
 	notRequired     bool
 	noReceiptHeader bool // receipt is then looked up by completion id
 	streamError     bool
-	receiptDigest   string // overrides the digest the receipt names
+	receiptDigest   string             // overrides the digest the receipt names
+	receiptSigner   ed25519.PrivateKey // signs receipts instead of the current key
+	receiptDelay    time.Duration      // the receipt endpoint stalls this long
+	signedReceiptID string             // the receipt_id the receipt states; empty is "rcpt-1"
+	signedChatID    string             // the chat_id the receipt states; empty is "chatcmpl-1"
+	chatDelay       time.Duration      // the chat endpoint stalls this long before answering
+	partDelay       time.Duration      // pause between the parts of an answer
+	tcbStatus       string             // the quote's TCB status; empty is "UpToDate"
+	advisoryIDs     []string           // the quote's Intel advisories
+	e2ee            *e2eetest.Service  // terminates E2EE v2 when set (call rotate after)
+	noTLSKey        bool               // keyset lists no TLS key (call rotate after)
+	futureSuite     bool               // keyset lists an E2EE suite of unknown shape first (call rotate after)
+	plainResponse   bool               // answers an E2EE request in plaintext
+	mrConfig        []byte             // the quote's MRCONFIGID; nil is version 1 of appCompose
+	serving         string             // service_capabilities.serving; empty is "aggregator"
+	versions        []string           // service_capabilities.supported_e2ee_versions; nil follows e2ee
+	upstream        string             // the receipt's upstream.verified result; empty is "verified", "none" omits the event
+	lastWire        []byte             // the request body as received
 	receipt404      atomic.Int32
 	attestations    atomic.Int32
 	chats           atomic.Int32 // chat requests received
@@ -108,6 +129,38 @@ func sseParts(withError bool) [][]byte {
 	return out
 }
 
+func (g *fakeGateway) e2eeVersions() []string {
+	if g.versions != nil {
+		return g.versions
+	}
+	if g.e2ee == nil {
+		return []string{}
+	}
+	return []string{"2"}
+}
+
+// sealParts encrypts a response the way the gateway does: the body, or each
+// data event of a stream.
+func sealParts(x *e2eetest.Exchange, parts [][]byte, stream bool) [][]byte {
+	out := make([][]byte, len(parts))
+	for i, p := range parts {
+		data, isEvent := bytes.CutPrefix(p, []byte("data: {"))
+		switch {
+		case !stream:
+			out[i], _ = x.SealResponse(p)
+		case isEvent:
+			sealed, err := x.SealEvent(append([]byte("{"), bytes.TrimSuffix(data, []byte("\n\n"))...))
+			if err != nil {
+				panic(err)
+			}
+			out[i] = append(append([]byte("data: "), sealed...), "\n\n"...)
+		default:
+			out[i] = p
+		}
+	}
+	return out
+}
+
 // quote stands in for DCAP verification of the fake gateway's quote.
 func (g *fakeGateway) quote(_ context.Context, hexQuote string) (QuoteResult, error) {
 	rd, err := hex.DecodeString(hexQuote)
@@ -117,15 +170,20 @@ func (g *fakeGateway) quote(_ context.Context, hexQuote string) (QuoteResult, er
 	unhex := func(s string) []byte { b, _ := hex.DecodeString(s); return b }
 	os := fakeWorkload.OS[0]
 	compose := sha256.Sum256([]byte(g.appCompose))
+	mrConfig := g.mrConfig
+	if mrConfig == nil {
+		mrConfig = mrConfigV1(compose)
+	}
 	return QuoteResult{
-		TCBStatus:  "UpToDate",
-		ReportData: rd,
-		MRTD:       unhex(os.MRTD),
-		RTMR0:      unhex(os.RTMR0),
-		RTMR1:      unhex(os.RTMR1),
-		RTMR2:      unhex(os.RTMR2),
-		MRConfigID: append(append([]byte{0x01}, compose[:]...), make([]byte, 15)...),
-		RTMR3:      g.rtmr3,
+		TCBStatus:   cmp.Or(g.tcbStatus, "UpToDate"),
+		AdvisoryIDs: g.advisoryIDs,
+		ReportData:  rd,
+		MRTD:        unhex(os.MRTD),
+		RTMR0:       unhex(os.RTMR0),
+		RTMR1:       unhex(os.RTMR1),
+		RTMR2:       unhex(os.RTMR2),
+		MRConfigID:  mrConfig,
+		RTMR3:       g.rtmr3,
 	}, nil
 }
 
@@ -151,12 +209,25 @@ func (g *fakeGateway) rotate(seed byte) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.key = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
+	e2eeKeys, tlsKeys := []any{}, []any{map[string]any{"spki_sha256": g.pin, "domain": g.domain}}
+	if g.e2ee != nil {
+		e2eeKeys = []any{
+			map[string]any{"key_id": "e1", "algo": "secp256k1-aes-256-gcm-hkdf-sha256", "public_key": "04" + strings.Repeat("ab", 64)},
+			map[string]any{"key_id": "e2", "algo": e2ee.Algo, "public_key": g.e2ee.PublicHex()},
+		}
+	}
+	if g.futureSuite {
+		e2eeKeys = append([]any{map[string]any{"key_id": "e3", "algo": "mlkem768-x25519-v3", "public_key": map[string]any{"kty": "OKP", "x": "abc"}}}, e2eeKeys...)
+	}
+	if g.noTLSKey {
+		tlsKeys = []any{}
+	}
 	g.keyset, _ = json.Marshal(map[string]any{
 		"subject":              nil,
 		"not_after":            time.Now().Add(30 * 24 * time.Hour).Unix(),
 		"receipt_signing_keys": []any{map[string]any{"key_id": "k1", "algo": "ed25519", "public_key": hex.EncodeToString(g.key.Public().(ed25519.PublicKey))}},
-		"e2ee_public_keys":     []any{},
-		"tls_public_keys":      []any{map[string]any{"spki_sha256": g.pin, "domain": g.domain}},
+		"e2ee_public_keys":     e2eeKeys,
+		"tls_public_keys":      tlsKeys,
 	})
 	g.digest, _ = KeysetDigest(g.keyset)
 }
@@ -187,12 +258,25 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 					"app_compose": g.appCompose,
 				},
 			},
-			"service_capabilities": map[string]any{"serving": "aggregator"},
+			"service_capabilities": map[string]any{"serving": cmp.Or(g.serving, "aggregator"), "supported_e2ee_versions": g.e2eeVersions()},
 		})
 
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 		g.chats.Add(1)
-		body, _ := io.ReadAll(r.Body)
+		if !pause(r, g.chatDelay) {
+			return
+		}
+		wire, _ := io.ReadAll(r.Body)
+		body := wire
+		var x *e2eetest.Exchange
+		if g.e2ee != nil && r.Header.Get("X-E2EE-Version") != "" {
+			var err error
+			if x, err = g.e2ee.OpenRequest(r.Header, wire, time.Now()); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			body = x.Hashed
+		}
 		var parsed struct {
 			Stream bool `json:"stream"`
 		}
@@ -204,13 +288,20 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		} else {
 			parts = [][]byte{[]byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"hello from tee"}}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)}
 		}
+		if x != nil && !g.plainResponse {
+			parts = sealParts(x, parts, parsed.Stream)
+			w.Header().Set("X-E2EE-Applied", "true")
+		}
 		g.mu.Lock()
-		g.lastReq, g.lastResp = body, bytes.Join(parts, nil)
+		g.lastReq, g.lastWire, g.lastResp = body, wire, bytes.Join(parts, nil)
 		g.mu.Unlock()
 		if !g.noReceiptHeader {
 			w.Header().Set("X-Receipt-Id", "rcpt-1")
 		}
-		for _, part := range parts {
+		for i, part := range parts {
+			if i > 0 && !pause(r, g.partDelay) {
+				return
+			}
 			if g.tamperResponse {
 				part = bytes.Replace(part, []byte("hello"), []byte("HELLO"), 1)
 			}
@@ -221,6 +312,9 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case r.Method == http.MethodGet && (r.URL.Path == "/v1/aci/receipts/rcpt-1" || r.URL.Path == "/v1/aci/receipts/chatcmpl-1"):
+		if !pause(r, g.receiptDelay) {
+			return
+		}
 		if g.receipt404.Load() > 0 {
 			g.receipt404.Add(-1)
 			http.NotFound(w, r)
@@ -233,23 +327,40 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		if g.receiptDigest != "" {
 			named = g.receiptDigest
 		}
+		events := []any{map[string]any{"type": "request.received", "body_hash": BodyHash(req)}}
+		if g.upstream != "none" {
+			events = append(events, map[string]any{"type": "upstream.verified", "result": cmp.Or(g.upstream, "verified"), "required": !g.notRequired, "model_id": "m", "session_id": strings.Repeat("ab", 32)})
+		}
+		events = append(events, map[string]any{"type": "response.returned", "body_hash": BodyHash(resp)})
 		doc := map[string]any{
-			"api_version": "aci/1", "receipt_id": "rcpt-1", "chat_id": "chatcmpl-1", "model": "m",
+			"api_version": "aci/1", "receipt_id": cmp.Or(g.signedReceiptID, "rcpt-1"), "chat_id": cmp.Or(g.signedChatID, "chatcmpl-1"), "model": "m",
 			"workload_keyset_digest": named, "endpoint": "/v1/chat/completions", "method": "POST",
 			"served_at": time.Now().Unix(), "key_id": "k1",
-			"event_log": []any{
-				map[string]any{"type": "request.received", "body_hash": BodyHash(req)},
-				map[string]any{"type": "upstream.verified", "result": "verified", "required": !g.notRequired, "model_id": "m", "session_id": strings.Repeat("ab", 32)},
-				map[string]any{"type": "response.returned", "body_hash": BodyHash(resp)},
-			},
+			"event_log": events,
 		}
 		raw, _ := json.Marshal(doc)
 		signed, _ := canon.Canonicalize(raw)
+		if g.receiptSigner != nil {
+			key = g.receiptSigner
+		}
 		doc["signature"] = hex.EncodeToString(ed25519.Sign(key, signed))
 		json.NewEncoder(w).Encode(doc)
 
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+// pause waits d, or until the client goes away (false).
+func pause(r *http.Request, d time.Duration) bool {
+	if d == 0 {
+		return true
+	}
+	select {
+	case <-time.After(d):
+		return true
+	case <-r.Context().Done():
+		return false
 	}
 }
 
@@ -305,6 +416,26 @@ func TestInferRejectsOptionalUpstream(t *testing.T) {
 	g.notRequired = true
 	_, err := g.provider(t).Infer(context.Background(), testReq)
 	assertCode(t, err, core.CodeReceiptInvalid)
+}
+
+// The default accepts an OutOfDate platform, and the evidence names the
+// advisories it lacks the fixes for; a stricter policy refuses it.
+func TestTCBStatusAndAdvisories(t *testing.T) {
+	g := newFakeGateway(t)
+	g.tcbStatus, g.advisoryIDs = "OutOfDate", []string{"INTEL-SA-01192", "INTEL-SA-01245"}
+	res, err := g.provider(t).Infer(context.Background(), testReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev := res.Verification.Evidence; ev.TCBStatus != "OutOfDate" || !slices.Equal(ev.AdvisoryIDs, g.advisoryIDs) {
+		t.Fatalf("evidence %+v", ev)
+	}
+	strict := func(o *Options) { o.Policy.AcceptedTCBStatuses = []string{"UpToDate"} }
+	_, err = g.provider(t, strict).Infer(context.Background(), testReq)
+	assertCode(t, err, core.CodeAttestationFailed)
+	if !strings.Contains(err.Error(), "INTEL-SA-01192") {
+		t.Fatalf("error does not name the advisories: %v", err)
+	}
 }
 
 func TestAttestRejectsWrongTLSKey(t *testing.T) {
@@ -370,6 +501,50 @@ func TestKeysetRotationIsReestablished(t *testing.T) {
 	}
 }
 
+// A keyset other than the one a request was sent under is trusted for its
+// receipt only while its attestation is fresh, as the current one is: a
+// replica's keyset attested within the hour is accepted, an older one must
+// be attested again.
+func TestKnownKeysetTrustedOnlyWhileFresh(t *testing.T) {
+	g := newFakeGateway(t)
+	var offset atomic.Int64
+	p := g.provider(t, func(o *Options) {
+		o.Now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+	})
+	id1, err := p.Attest(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	k1 := g.key
+	g.mu.Unlock()
+	// The gateway now attests keyset 2, which the next call establishes.
+	g.rotate(0x08)
+	offset.Store(int64(time.Minute))
+	if _, err := p.Infer(context.Background(), testReq); err != nil {
+		t.Fatal(err)
+	}
+	// A replica still signs with keyset 1, attested 30 minutes ago.
+	g.receiptDigest, g.receiptSigner = id1.KeysetDigest, k1
+	offset.Store(int64(30 * time.Minute))
+	res, err := p.Infer(context.Background(), testReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Verification.Evidence.KeysetDigest != id1.KeysetDigest || g.attestations.Load() != 2 {
+		t.Fatalf("keyset %s, %d attestations", res.Verification.Evidence.KeysetDigest, g.attestations.Load())
+	}
+	// 90 minutes after it was attested, keyset 1 is no longer trusted, though
+	// its not_after is weeks away; the gateway no longer attests it.
+	offset.Store(int64(90 * time.Minute))
+	_, err = p.Infer(context.Background(), testReq)
+	assertCode(t, err, core.CodeEvidenceUnavailable)
+	var e *core.Error
+	if errors.As(err, &e); e.Verification == nil || e.Verification.Status != core.Unverified {
+		t.Fatalf("verification %+v", e.Verification)
+	}
+}
+
 func TestReceiptNamingUnknownKeysetIsUnverified(t *testing.T) {
 	g := newFakeGateway(t)
 	g.receiptDigest = "sha256:" + strings.Repeat("00", 32)
@@ -378,6 +553,27 @@ func TestReceiptNamingUnknownKeysetIsUnverified(t *testing.T) {
 	var e *core.Error
 	errors.As(err, &e)
 	if e.Verification == nil || e.Verification.Status != core.Unverified {
+		t.Fatalf("verification %+v", e.Verification)
+	}
+}
+
+// The receipt the gateway returns for the X-Receipt-Id it named must be
+// that receipt: a different one, even one covering the same bytes, is
+// refused.
+func TestReceiptMustBeTheOneRequested(t *testing.T) {
+	g := newFakeGateway(t)
+	res, err := g.provider(t).Infer(context.Background(), testReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Verification.Evidence.ReceiptID != "rcpt-1" {
+		t.Fatalf("receipt id %q", res.Verification.Evidence.ReceiptID)
+	}
+	g.signedReceiptID = "rcpt-other"
+	_, err = g.provider(t).Infer(context.Background(), testReq)
+	assertCode(t, err, core.CodeReceiptInvalid)
+	var e *core.Error
+	if errors.As(err, &e); e.Verification == nil || e.Verification.Status != core.Failed {
 		t.Fatalf("verification %+v", e.Verification)
 	}
 }
@@ -462,4 +658,17 @@ func TestLiveAttestation(t *testing.T) {
 	t.Logf("verified keyset %s (not_after %s)", id.KeysetDigest, id.NotAfter.UTC())
 	t.Logf("TCB %s, compose %s, serving %s", id.TCBStatus, id.ComposeHash, id.Serving)
 	t.Logf("source %s@%s, TLS pins %v", id.RepoURL, id.RepoCommit, id.TLSPins)
+
+	ep, err := New(Options{APIKey: "unused-for-attestation", E2EE: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eid, err := ep.Attest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eid.E2EEKey == "" {
+		t.Fatal("no attested E2EE key")
+	}
+	t.Logf("attested E2EE v2 key %s", eid.E2EEKey)
 }

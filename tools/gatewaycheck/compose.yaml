@@ -1,0 +1,46 @@
+# The real Private AI Gateway on dstack's TEE simulator, in direct mode, with
+# an OpenAI-compatible mock upstream that the Go interop test serves on the
+# host. For TestGatewayInterop only: the simulator's quote and keys are not
+# genuine.
+#
+#   docker compose -f tools/gatewaycheck/compose.yaml up -d --build
+#   PRIVATEAI_GATEWAY_INTEROP=http://127.0.0.1:18086 go test ./provider/phala -run GatewayInterop -v
+name: aci-interop
+
+services:
+  dstack-simulator:
+    build:
+      context: .
+      dockerfile: simulator.Dockerfile
+    volumes:
+      - sock:/run/dstack
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway.Dockerfile
+    ports:
+      - "127.0.0.1:18086:8086"
+    environment:
+      PRIVATE_AI_GATEWAY_CONFIG_PATH: /etc/gw/config.json
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    configs:
+      - source: config
+        target: /etc/gw/config.json
+      - source: upstreams
+        target: /etc/gw/upstreams.json
+    volumes:
+      - sock:/var/run/dstack
+    depends_on: [dstack-simulator]
+
+configs:
+  config:
+    content: |
+      {"bind":"0.0.0.0:8086","state_dir":"/tmp/gw-state","upstream_config_seed_path":"/etc/gw/upstreams.json","dstack_endpoint":"unix:/var/run/dstack/dstack.sock","direct_serving":true}
+  upstreams:
+    content: |
+      [{"name":"mock","provider":"openai-compatible","base_url":"http://host.docker.internal:18087","models":{"mock-model":"mock-model"}}]
+
+volumes:
+  sock:

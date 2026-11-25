@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"slices"
 
 	nearai "github.com/nearai/inference-sdk/go"
 
@@ -14,6 +15,7 @@ import (
 // QuoteResult is what the SDK needs from a verified TDX quote.
 type QuoteResult struct {
 	TCBStatus    string
+	AdvisoryIDs  []string
 	DebugEnabled bool
 	ReportData   []byte
 	MRTD         []byte
@@ -32,7 +34,11 @@ type QuoteVerifier func(ctx context.Context, hexQuote string) (QuoteResult, erro
 // root (the verifier shipped in NEAR's Go SDK, with collateral from Phala's
 // PCCS) and then reads every measurement from the authenticated quote bytes.
 func DefaultQuoteVerifier() QuoteVerifier {
-	verify := nearai.CreateTDXQuoteVerifier("")
+	return dcapQuoteVerifier(nearai.CreateTDXQuoteVerifier(""))
+}
+
+// dcapQuoteVerifier reads the measurements of quotes verify accepts.
+func dcapQuoteVerifier(verify nearai.QuoteVerifier) QuoteVerifier {
 	return func(ctx context.Context, hexQuote string) (QuoteResult, error) {
 		r, err := verify(ctx, hexQuote)
 		if err != nil {
@@ -51,6 +57,7 @@ func DefaultQuoteVerifier() QuoteVerifier {
 			return QuoteResult{}, errors.New("quote fields disagree with the DCAP verifier")
 		}
 		td.TCBStatus, td.DebugEnabled = r.TCBStatus, r.DebugEnabled
+		td.AdvisoryIDs = slices.Clone(r.AdvisoryIDs)
 		return td, nil
 	}
 }

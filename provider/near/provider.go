@@ -40,8 +40,9 @@ var errClosed = core.Errorf(core.CodeProviderError, nil, "NEAR provider is close
 
 type Options struct {
 	APIKey  string
-	BaseURL string // defaults to NEAR AI Cloud's gateway
-	// Timeout bounds each call, including the verification.
+	BaseURL string // https; defaults to NEAR AI Cloud's gateway
+	// Timeout bounds each call as a whole, including the identity check and
+	// the verification. A stream is one such call. Zero means 2 minutes.
 	Timeout time.Duration
 	Policy  core.Policy
 	// Workload is the gateway and model code to accept. Nil means
@@ -73,19 +74,42 @@ func New(o Options) (*Provider, error) {
 	if o.APIKey == "" {
 		return nil, errors.New("near: API key is required")
 	}
+	// The API key goes out with the first attestation fetch, before any
+	// TLS key is pinned: never over plain HTTP. The URL itself is not
+	// echoed, since it can carry credentials.
+	if o.BaseURL != "" {
+		if u, err := url.Parse(o.BaseURL); err != nil || u.Scheme != "https" || u.Host == "" {
+			return nil, errors.New("near: base URL must be an https URL")
+		}
+	}
 	w := ProductionWorkload()
 	if o.Workload != nil {
 		w = *o.Workload
 	}
 	quote := osQuoteVerifier(nearai.CreateTDXQuoteVerifier(""), w.OS)
 	tcb := o.Policy.TCBStatuses()
-	gateway := nearai.VerificationOptions{Policy: nearai.AttestationPolicy{AcceptedTCBStatuses: tcb}, QuoteVerifier: quote}
-	// Model VMs run on confidential GPUs: their NVIDIA evidence must be
-	// present and verified, not only checked when supplied.
-	model := gateway
-	model.Policy.RequireGPUEvidence = true
 
 	clientOpts := nearai.ClientOptions{APIKey: o.APIKey, BaseURL: o.BaseURL}
+	src, err := nearai.NewAttestationClient(clientOpts)
+	if err != nil {
+		return nil, fmt.Errorf("near: %w", err)
+	}
+	// The identity check reads which app runs. The GPU evidence of the
+	// machines it establishes is verified by the SDK's sessions.
+	identityOpts := nearai.VerificationOptions{
+		Policy:        nearai.AttestationPolicy{AcceptedTCBStatuses: tcb},
+		QuoteVerifier: quote,
+		GPUVerifier:   func(context.Context, string) error { return nil },
+	}
+	ident := newIdentity(src,
+		func(ctx context.Context, a nearai.Attestation, b nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
+			return nearai.VerifyGatewayAttestation(ctx, a, b, identityOpts)
+		},
+		func(ctx context.Context, a nearai.Attestation, b nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
+			return nearai.VerifyModelAttestation(ctx, a, b, identityOpts)
+		},
+		w)
+	gateway, model := sessionOptions(quote, tcb, ident)
 	c, err := nearai.NewInferenceClient(nearai.InferenceOptions{
 		ClientOptions:       clientOpts,
 		SigningAlgo:         nearai.Ed25519,
@@ -95,26 +119,36 @@ func New(o Options) (*Provider, error) {
 		DeploymentPolicy:    deploymentPolicy(o.Policy),
 	})
 	if err != nil {
+		ident.close()
 		return nil, fmt.Errorf("near: %w", err)
 	}
-	src, err := nearai.NewAttestationClient(clientOpts)
+	p, err := newWithClient(c, ident, o.Timeout)
 	if err != nil {
 		c.Close()
-		return nil, fmt.Errorf("near: %w", err)
+		ident.close()
+		return nil, err
 	}
-	// The identity check reads which app runs. The GPU evidence of the
-	// keys it establishes is verified by the session preflight above.
-	identityOpts := gateway
-	identityOpts.GPUVerifier = func(context.Context, string) error { return nil }
-	ident := newIdentity(src,
-		func(ctx context.Context, a nearai.Attestation, b nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
-			return nearai.VerifyGatewayAttestation(ctx, a, b, identityOpts)
-		},
-		func(ctx context.Context, a nearai.Attestation, b nearai.ClientBinding) (nearai.VerifiedAttestation, error) {
-			return nearai.VerifyModelAttestation(ctx, a, b, identityOpts)
-		},
-		w)
-	return newWithClient(c, ident, o.Timeout)
+	return p, nil
+}
+
+// sessionOptions are what NEAR's SDK verifies each session it creates with.
+// The SDK checks the quote (with the OS build), its binding and, for model
+// VMs, which run on confidential GPUs, NVIDIA evidence that must be present
+// and verified. On top of that every quote must come from a machine ident
+// has established as NEAR's gateway or model app. The SDK encrypts a prompt
+// only to a model key of the session it sends with, so that key is
+// identity-checked even when the SDK replaces its session after
+// checkIdentity.
+func sessionOptions(quote nearai.QuoteVerifier, tcb []string, ident *identity) (gateway, model nearai.VerificationOptions) {
+	gateway = nearai.VerificationOptions{
+		Policy:        nearai.AttestationPolicy{AcceptedTCBStatuses: tcb},
+		QuoteVerifier: ident.gate(quote, roleGateway),
+	}
+	model = nearai.VerificationOptions{
+		Policy:        nearai.AttestationPolicy{AcceptedTCBStatuses: tcb, RequireGPUEvidence: true},
+		QuoteVerifier: ident.gate(quote, roleModel),
+	}
+	return gateway, model
 }
 
 // deploymentPolicy enforces the compose allowlist, when one is set, on the
@@ -165,6 +199,15 @@ func (p *Provider) Infer(ctx context.Context, req core.InferRequest) (*core.Infe
 		return nil, err
 	}
 	resp, err := p.send(callCtx, ctx, req)
+	if errors.Is(err, errUnestablished) {
+		// NEAR's SDK replaced its session after the check, on a machine not
+		// established yet, and refused it before sending anything. Establish
+		// that machine and send again.
+		if e, err = p.checkIdentity(callCtx, ctx, req.Model); err != nil {
+			return nil, err
+		}
+		resp, err = p.send(callCtx, ctx, req)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -189,24 +232,39 @@ func (p *Provider) Infer(ctx context.Context, req core.InferRequest) (*core.Infe
 // session, the one the prompt will be encrypted under, to use only those
 // keys. It runs before anything is sent.
 //
-// NEAR's SDK may replace its session between this check and the send (on
-// expiry). The replacement has passed the SDK's own quote, GPU and OS
-// checks, and its response signer must still be established, so such a
-// result is refused; only the app identity of the key the prompt was
-// encrypted to is then unchecked.
+// NEAR serves a model from several machines, and its SDK refuses a session
+// on a machine not established yet (sessionOptions): the identity is then
+// established again, which may report that machine. The SDK holds a session
+// that replaces this one before the send (on expiry) to the same rule, so
+// the prompt is only ever encrypted to an identity-checked key.
 func (p *Provider) checkIdentity(ctx, callerCtx context.Context, model string) (*established, error) {
 	e, err := p.ident.get(ctx, model)
 	if err != nil {
 		return nil, identityErr(callerCtx, err)
 	}
-	sess, err := p.c.Verify(ctx, model)
-	if err != nil {
-		return nil, core.Wrap(callerCtx, codeFor(err), detailed(err), "attest NEAR session")
+	for round := 0; ; round++ {
+		sess, err := p.c.Verify(ctx, model)
+		switch {
+		case err == nil:
+			// The session's machines passed the gate, which accepts those
+			// established for any model; its keys must also be the ones
+			// established for this model.
+			if err = e.checkSession(sess); err == nil {
+				return e, nil
+			}
+		case !errors.Is(err, errUnestablished):
+			return nil, core.Wrap(callerCtx, codeFor(err), detailed(err), "attest NEAR session")
+		}
+		if round == learnRounds {
+			if errors.Is(err, errUnestablished) {
+				err = fmt.Errorf("%w: NEAR's SDK chose a machine the identity check did not establish", err)
+			}
+			return nil, core.Errorf(core.CodeAttestationFailed, err, "NEAR session")
+		}
+		if e, err = p.ident.refresh(ctx, model); err != nil {
+			return nil, identityErr(callerCtx, err)
+		}
 	}
-	if e, err = p.ident.covering(ctx, model, e, sess); err != nil {
-		return nil, identityErr(callerCtx, err)
-	}
-	return e, nil
 }
 
 // identityErr gives an identity failure an SDK code. The caller's own
@@ -307,6 +365,7 @@ func (p *Provider) verify(ctx, callerCtx context.Context, id, model string, e *e
 	}
 	if a := r.Attestation; a != nil {
 		ver.Evidence.TCBStatus = a.TCBStatus
+		ver.Evidence.AdvisoryIDs = slices.Clone(a.AdvisoryIDs)
 		ver.Evidence.ComposeHash = a.Deployment.RuntimeMeasurements.ComposeHash
 		ver.Evidence.OSImageHash = a.Deployment.RuntimeMeasurements.OSImageHash
 	}

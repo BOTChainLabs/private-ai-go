@@ -1,0 +1,12 @@
+[package]
+name = "serdecheck"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The serde_json build of the Private AI Gateway at commit 22d08e24: version
+# and features as in its Cargo.lock and dependency graph.
+[dependencies]
+serde_json = { version = "=1.0.149", features = ["preserve_order", "float_roundtrip"] }
+
+[workspace]

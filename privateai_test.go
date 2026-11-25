@@ -3,8 +3,12 @@ package privateai
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/BOTChainLabs/private-ai-go/provider/near"
@@ -94,8 +98,18 @@ func TestExtraIdentityExtendsBuiltIn(t *testing.T) {
 	if !slices.Equal(n.Gateway.AppIDs, nw.Gateway.AppIDs) {
 		t.Fatal("an extra app ID was accepted as NEAR's gateway")
 	}
+	// Phala's deployments keep their own KMS: the extras join each of them.
+	if len(p.Deployments) != len(pw.Deployments) {
+		t.Fatalf("deployments %+v", p.Deployments)
+	}
+	for i, d := range p.Deployments {
+		b := pw.Deployments[i]
+		if !slices.Equal(d.OS, append(b.OS, extraOS)) || !slices.Equal(d.AppIDs, append(b.AppIDs, extraApp)) || !slices.Equal(d.KeyProviders, b.KeyProviders) {
+			t.Fatalf("deployment %d: %+v", i, d)
+		}
+	}
 	// Without extras, the built-in identity is used unchanged.
-	if !slices.Equal(phalaOptions(ProviderConfig{}, 0).Workload.OS, pw.OS) {
+	if w := phalaOptions(ProviderConfig{}, 0).Workload; !slices.Equal(w.OS, pw.OS) || !slices.Equal(w.Deployments[0].OS, pw.Deployments[0].OS) {
 		t.Fatal("phala OS builds changed without extras")
 	}
 }
@@ -125,5 +139,112 @@ func TestExtraIdentityValidation(t *testing.T) {
 		Models:    []ModelEntry{{Provider: NEAR, Model: "x"}},
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+var testGateway = GatewayIdentity{AppIDs: []string{extraApp}, OS: []OSMeasurement{extraOS}, ComposeHashes: []string{strings.Repeat("ab", 32)}}
+
+func TestGatewayUsesItsOwnIdentity(t *testing.T) {
+	o, err := gatewayOptions(ProviderConfig{APIKey: "k", BaseURL: "https://gw.example", Identity: &testGateway, ExtraAppIDs: []string{strings.Repeat("22", 20)}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := o.Workload
+	// The release is pinned, and TLS that ends outside the TEE is refused
+	// unless the caller accepts it.
+	if o.ID != Gateway || !o.E2EE || o.UnpinnedTLS || !slices.Equal(o.Policy.ComposeHashes, testGateway.ComposeHashes) {
+		t.Fatalf("options %+v", o)
+	}
+	outside := testGateway
+	outside.AllowTLSOutsideTEE = true
+	if o, err := gatewayOptions(ProviderConfig{APIKey: "k", BaseURL: "https://gw.example", Identity: &outside}, 0); err != nil || !o.UnpinnedTLS {
+		t.Fatalf("TLS outside the TEE: %+v, %v", o, err)
+	}
+	if !slices.Equal(w.OS, []OSMeasurement{extraOS}) || !slices.Equal(w.AppIDs, []string{extraApp, strings.Repeat("22", 20)}) {
+		t.Fatalf("workload %+v", w)
+	}
+	// Phala's gateway apps are never accepted for someone else's gateway, and
+	// the default key provider is Phala Cloud's KMS alone, not the KMS of
+	// Phala's own gateway.
+	for _, app := range phala.ProductionWorkload().AppIDs {
+		if slices.Contains(w.AppIDs, app) {
+			t.Fatalf("Phala's app %s accepted for a self-hosted gateway", app)
+		}
+	}
+	if !slices.Equal(w.KeyProviders, phala.CloudKeyProviders()) || len(w.KeyProviders) != 1 {
+		t.Fatalf("key providers %v", w.KeyProviders)
+	}
+}
+
+func TestGatewayConfigValidation(t *testing.T) {
+	noOS := GatewayIdentity{AppIDs: testGateway.AppIDs, ComposeHashes: testGateway.ComposeHashes}
+	noCompose := GatewayIdentity{AppIDs: testGateway.AppIDs, OS: testGateway.OS}
+	badCompose := testGateway
+	badCompose.ComposeHashes = []string{"abcd"}
+	badKMS := testGateway
+	badKMS.KeyProviders = []string{"not hex"}
+	cases := map[string]map[ProviderID]ProviderConfig{
+		"no identity":       {Gateway: {APIKey: "k", BaseURL: "https://gw.example"}},
+		"no base URL":       {Gateway: {APIKey: "k", Identity: &testGateway}},
+		"http base URL":     {Gateway: {APIKey: "k", BaseURL: "http://gw.example", Identity: &testGateway}},
+		"no OS":             {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &noOS}},
+		"no compose pin":    {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &noCompose}},
+		"bad compose pin":   {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &badCompose}},
+		"compose in Policy": {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &testGateway, Policy: Policy{ComposeHashes: testGateway.ComposeHashes}}},
+		"bad key provider":  {Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &badKMS}},
+		"identity on Phala": {Phala: {APIKey: "k", Identity: &testGateway}},
+	}
+	for name, providers := range cases {
+		t.Run(name, func(t *testing.T) {
+			var models []ModelEntry
+			for id := range providers {
+				models = append(models, ModelEntry{Provider: id, Model: "m"})
+			}
+			if _, err := New(Config{Providers: providers, Models: models}); err == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+	c, err := New(Config{
+		Providers: map[ProviderID]ProviderConfig{Gateway: {APIKey: "k", BaseURL: "https://gw.example", Identity: &testGateway}},
+		Models:    []ModelEntry{{Provider: Gateway, Model: "z-ai/glm-5.3"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+}
+
+func TestPhalaE2EEIsOptIn(t *testing.T) {
+	if phalaOptions(ProviderConfig{}, 0).E2EE || !phalaOptions(ProviderConfig{E2EE: true}, 0).E2EE {
+		t.Fatal("ProviderConfig.E2EE not passed to Phala")
+	}
+}
+
+// No provider sends the API key over plain HTTP: a base URL that is not
+// https is refused when the client is created.
+func TestPlainHTTPBaseURLRefused(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	for _, id := range []ProviderID{Phala, NEAR} {
+		c, err := New(Config{
+			Providers: map[ProviderID]ProviderConfig{id: {APIKey: "sk-secret", BaseURL: srv.URL + "/v1"}},
+			Models:    []ModelEntry{{Provider: id, Model: "m"}},
+		})
+		if err == nil {
+			c.Infer(context.Background(), InferRequest{Provider: id, Model: "m", Messages: []Message{{Role: "user", Content: "hi"}}})
+			c.Close()
+			t.Errorf("%s: accepted an http base URL", id)
+		}
+		if strings.Contains(fmt.Sprint(err), "sk-secret") {
+			t.Errorf("%s: the error shows the API key: %v", id, err)
+		}
+	}
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("%d requests reached the plain-HTTP server", n)
 	}
 }

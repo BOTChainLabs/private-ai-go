@@ -28,18 +28,35 @@ const (
 	attestTries = 3
 )
 
-var errClosed = core.Errorf(core.CodeProviderError, nil, "Phala provider is closed")
-
 type Options struct {
+	// ID names the gateway in results. Zero means core.Phala. Any other ID
+	// is a gateway of its own, such as core.Gateway, and requires BaseURL
+	// and Workload.
+	ID      core.ProviderID
 	APIKey  string
-	BaseURL string // defaults to DefaultBaseURL
-	// Timeout bounds non-streaming calls and the preflight. Streams are
-	// bounded only by the caller's context.
+	BaseURL string // defaults to DefaultBaseURL for Phala
+	// Timeout bounds each non-streaming call as a whole: the preflight,
+	// sending, reading the answer and verifying its receipt, with any
+	// re-attestation. For a stream it bounds opening it, until the response
+	// headers arrive, and Verify; reading the stream is bounded only by the
+	// caller's context. It also bounds each preflight. Zero means 2 minutes.
 	Timeout time.Duration
 	// Workload is the gateway code to accept. Nil means ProductionWorkload,
 	// which matches inference.phala.com.
 	Workload *Workload
 	Policy   core.Policy
+	// E2EE encrypts message content to the gateway's attested key (E2EE v2)
+	// and decrypts the generated content, on top of the pinned TLS channel.
+	E2EE bool
+	// UnpinnedTLS, with E2EE, accepts a gateway whose TLS ends outside its
+	// TEE, such as at a cloud load balancer, so that its keyset lists no TLS
+	// key for the host. Whoever terminates TLS is then trusted: E2EE keeps
+	// message content from the gateway's operator, but E2EE v2 does not bind
+	// the client's key, so the TLS terminator can resend a request with its
+	// own key within the replay window and read the answer. The API key and
+	// the other parameters are protected by ordinary TLS only, and the
+	// serving mode the report states is ignored (see Identity.Serving).
+	UnpinnedTLS bool
 	// QuoteVerifier defaults to DefaultQuoteVerifier.
 	QuoteVerifier QuoteVerifier
 	// Transport is the base transport; tests inject one. Defaults to a clone
@@ -58,6 +75,9 @@ type session struct {
 }
 
 type Provider struct {
+	id           core.ProviderID
+	route        string // how results were served, for Verification.Route
+	e2ee         bool
 	apiKey       string
 	base         *url.URL
 	timeout      time.Duration
@@ -71,29 +91,52 @@ type Provider struct {
 	mu      sync.Mutex
 	closed  bool
 	current *session            // used for new requests
-	known   map[string]*session // every unexpired verified keyset, by digest
+	known   map[string]*session // every keyset attested within identityMaxAge, by digest
 }
 
 func New(o Options) (*Provider, error) {
+	id := o.ID
+	if id == "" {
+		id = core.Phala
+	}
 	if o.APIKey == "" {
-		return nil, errors.New("phala: API key is required")
+		return nil, fmt.Errorf("%s: API key is required", id)
 	}
 	raw := o.BaseURL
-	if raw == "" {
+	if raw == "" && id == core.Phala {
 		raw = DefaultBaseURL
 	}
 	base, err := url.Parse(raw)
 	if err != nil || base.Scheme != "https" || base.Host == "" {
-		return nil, fmt.Errorf("phala: base URL must be https: %q", raw)
+		// Not echoed: a URL can carry credentials.
+		return nil, fmt.Errorf("%s: base URL must be an https URL", id)
+	}
+	// Phala's identity proves nothing about another gateway, and an empty
+	// one would accept any app on any OS.
+	if w := o.Workload; id != core.Phala && (w == nil || len(w.OS) == 0 || len(w.AppIDs) == 0 || len(w.KeyProviders) == 0) {
+		return nil, fmt.Errorf("%s: the gateway's OS builds, app IDs and key providers are required", id)
+	}
+	if w := o.Workload; w != nil {
+		for i, d := range w.Deployments {
+			if !d.complete() {
+				return nil, fmt.Errorf("%s: workload deployment %d needs its app IDs, key providers and OS builds", id, i)
+			}
+		}
+	}
+	if o.UnpinnedTLS && !o.E2EE {
+		return nil, fmt.Errorf("%s: UnpinnedTLS requires E2EE", id)
 	}
 	p := &Provider{
+		id:        id,
+		route:     string(id) + "-aci",
+		e2ee:      o.E2EE,
 		apiKey:    o.APIKey,
 		base:      base,
 		timeout:   o.Timeout,
 		transport: o.Transport,
 		now:       o.Now,
 		known:     map[string]*session{},
-		verifier:  Verifier{Quote: o.QuoteVerifier, Policy: o.Policy},
+		verifier:  Verifier{Quote: o.QuoteVerifier, Policy: o.Policy, E2EE: o.E2EE, UnpinnedTLS: o.UnpinnedTLS},
 	}
 	if p.timeout == 0 {
 		p.timeout = 2 * time.Minute
@@ -119,7 +162,11 @@ func New(o Options) (*Provider, error) {
 	return p, nil
 }
 
-func (p *Provider) ID() core.ProviderID { return core.Phala }
+func (p *Provider) ID() core.ProviderID { return p.id }
+
+func (p *Provider) errClosed() error {
+	return core.Errorf(core.CodeProviderError, nil, "%s provider is closed", p.id)
+}
 
 // Close drops every established session and its idle connections. A
 // preflight still running when Close is called is discarded.
@@ -151,7 +198,7 @@ func (p *Provider) session(ctx context.Context) (*session, error) {
 	closed, s := p.closed, p.current
 	p.mu.Unlock()
 	if closed {
-		return nil, errClosed
+		return nil, p.errClosed()
 	}
 	if s != nil && p.now().Before(s.expires) {
 		return s, nil
@@ -182,13 +229,15 @@ func (p *Provider) refresh(ctx context.Context) (*session, error) {
 
 // sessionFor returns an established session for the keyset a receipt names.
 // A deployment may run replicas with their own keysets (spec §3.3), so a
-// keyset not seen yet is looked for with a few fresh preflights. Sessions
-// other callers are using stay valid meanwhile.
+// keyset not seen yet is looked for with a few fresh preflights. A keyset is
+// trusted for this only while its attestation is fresh, like the current
+// one: an older one is looked for again. Sessions other callers are using
+// stay valid meanwhile.
 func (p *Provider) sessionFor(ctx context.Context, digest string) (*session, error) {
 	p.mu.Lock()
 	s := p.known[digest]
 	p.mu.Unlock()
-	if s != nil && p.now().Before(s.id.NotAfter) {
+	if s != nil && p.now().Before(s.expires) {
 		return s, nil
 	}
 	for range attestTries {
@@ -252,15 +301,20 @@ func (p *Provider) attest(ctx context.Context) (*session, error) {
 		}
 		return nil, core.Wrap(noCaller, core.CodeAttestationFailed, err, "verify attestation report")
 	}
-	// The report itself must have arrived over an attested TLS key.
-	if !peerPinned(resp.TLS, id.TLSPins) {
+	// The report itself must have arrived over an attested TLS key. Without
+	// one, which the verifier allows only with E2EE and UnpinnedTLS, the
+	// report came through whoever terminates TLS: content is still encrypted
+	// to the attested E2EE key, but the report's unattested fields are not
+	// trusted (see Identity.Serving).
+	if len(id.TLSPins) > 0 && !peerPinned(resp.TLS, id.TLSPins) {
 		return nil, core.Errorf(core.CodeTLSPinMismatch, ErrTLSPinMismatch, "attestation was served over a TLS key the keyset does not list")
 	}
 	return p.store(id)
 }
 
 // store records a verified identity as current, reusing the pinned transport
-// of an earlier session for the same keyset, and drops expired keysets.
+// of an earlier session for the same keyset, and drops keysets whose
+// attestation is no longer fresh.
 func (p *Provider) store(id *Identity) (*session, error) {
 	now := p.now()
 	expires := now.Add(identityMaxAge)
@@ -272,19 +326,23 @@ func (p *Provider) store(id *Identity) (*session, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
-		return nil, errClosed
+		return nil, p.errClosed()
 	}
 	if prev := p.known[id.KeysetDigest]; prev != nil {
 		s.transport, s.client, s.streamClient = prev.transport, prev.client, prev.streamClient
 	} else {
-		s.transport = pinnedTransport(p.transport, id.TLSPins)
+		if len(id.TLSPins) > 0 {
+			s.transport = pinnedTransport(p.transport, id.TLSPins)
+		} else {
+			s.transport = p.transport.Clone()
+		}
 		s.client = newClient(s.transport, p.timeout)
 		s.streamClient = newClient(s.transport, 0)
 	}
 	p.known[id.KeysetDigest] = s
 	p.current = s
 	for d, k := range p.known {
-		if !now.Before(k.id.NotAfter) {
+		if !now.Before(k.expires) {
 			delete(p.known, d)
 			k.transport.CloseIdleConnections()
 		}

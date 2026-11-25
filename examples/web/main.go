@@ -6,9 +6,12 @@
 //	PHALA_API_KEY=... NEARAI_API_KEY=... go run ./examples/web
 //	open http://127.0.0.1:8080
 //
-// It listens on localhost. To serve other machines, pass -addr and set
-// DEMO_PASSWORD (HTTP basic auth, any user name): every message spends the
-// keys' credits.
+// PHALA_E2EE=1 also encrypts Phala prompts and answers end to end.
+//
+// It listens on localhost and answers only requests addressed to a loopback
+// name. To serve other machines, pass -addr with -tls-cert and -tls-key, and
+// set DEMO_PASSWORD (HTTP basic auth, any user name): every message spends
+// the keys' credits. In both cases the API refuses cross-site requests.
 package main
 
 import (
@@ -22,10 +25,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,10 +42,12 @@ var page []byte
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
+	certFile := flag.String("tls-cert", "", "TLS certificate (PEM); required beyond localhost")
+	keyFile := flag.String("tls-key", "", "TLS private key (PEM); required beyond localhost")
 	flag.Parse()
 	password := os.Getenv("DEMO_PASSWORD")
-	if password == "" && !isLoopback(*addr) {
-		log.Fatal("set DEMO_PASSWORD to listen beyond localhost: every message spends the API keys' credits")
+	if err := checkListen(*addr, password, *certFile, *keyFile); err != nil {
+		log.Fatal(err)
 	}
 	cfg := configFromEnv()
 	if len(cfg.Providers) == 0 {
@@ -53,7 +60,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           withHeaders(withPassword(password, (&server{client: client}).routes())),
+		Handler:           handler(client, password, isLoopback(*addr)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -69,8 +76,14 @@ func main() {
 		}
 	}()
 
-	log.Printf("open http://%s", *addr)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	if *certFile != "" {
+		log.Printf("open https://%s", *addr)
+		err = srv.ListenAndServeTLS(*certFile, *keyFile)
+	} else {
+		log.Printf("open http://%s", *addr)
+		err = srv.ListenAndServe()
+	}
+	if !errors.Is(err, http.ErrServerClosed) {
 		client.Close()
 		log.Fatal(err)
 	}
@@ -92,10 +105,56 @@ func configFromEnv() privateai.Config {
 		if key == "" {
 			continue
 		}
-		cfg.Providers[p.id] = privateai.ProviderConfig{APIKey: key}
+		cfg.Providers[p.id] = privateai.ProviderConfig{APIKey: key, E2EE: p.id == privateai.Phala && os.Getenv("PHALA_E2EE") == "1"}
 		cfg.Models = append(cfg.Models, privateai.ModelEntry{Provider: p.id, Model: cmp.Or(os.Getenv(p.modelEnv), p.model)})
 	}
 	return cfg
+}
+
+// checkListen refuses to serve beyond localhost without a password and TLS:
+// every message spends the API keys' credits, and basic auth over plain
+// HTTP would send the password, and the answers, in clear.
+func checkListen(addr, password, certFile, keyFile string) error {
+	if (certFile == "") != (keyFile == "") {
+		return errors.New("pass both -tls-cert and -tls-key")
+	}
+	if !isLoopback(addr) && (password == "" || certFile == "") {
+		return errors.New("to listen beyond localhost, set DEMO_PASSWORD and pass -tls-cert and -tls-key: every message spends the API keys' credits")
+	}
+	return nil
+}
+
+// handler is the page and its API with their protections. A browser sends
+// a page's cross-site POST without asking (CSRF): those are refused, and the
+// API takes JSON only, which a cross-site page cannot send without the
+// browser asking first. On localhost, a page on a domain that resolves to
+// 127.0.0.1 (DNS rebinding) is same-origin with itself and could read the
+// answers, so only loopback names are served; beyond localhost, TLS binds
+// the name instead.
+func handler(client *privateai.Client, password string, loopback bool) http.Handler {
+	h := withPassword(password, (&server{client: client}).routes())
+	h = http.NewCrossOriginProtection().Handler(h)
+	if loopback {
+		h = loopbackHostOnly(h)
+	}
+	return withHeaders(h)
+}
+
+// loopbackHostOnly serves only requests addressed to localhost or a
+// loopback IP.
+func loopbackHostOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			host = strings.TrimSuffix(strings.TrimPrefix(r.Host, "["), "]")
+		}
+		ip := net.ParseIP(host)
+		if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+			http.Error(w, "this demo serves localhost only", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func isLoopback(addr string) bool {
@@ -171,7 +230,10 @@ var providers = map[privateai.ProviderID]providerInfo{
 		{"Approved code", func(e privateai.Evidence) string {
 			return "Phala's gateway app " + short(e.AppID) + ", on a pinned dstack OS build, with keys from Phala's KMS."
 		}},
-		{"Private channel", func(privateai.Evidence) string {
+		{"Private channel", func(e privateai.Evidence) string {
+			if e.E2EE != "" {
+				return "TLS is pinned to the key attested inside the TEE, and the prompt and answer are also encrypted end to end (E2EE v2) between this server and the TEE."
+			}
 			return "TLS is pinned to the key attested inside the TEE, so the prompt is decrypted only there."
 		}},
 		{"Model in a TEE", func(e privateai.Evidence) string {
@@ -198,6 +260,9 @@ var providers = map[privateai.ProviderID]providerInfo{
 func tcb(e privateai.Evidence) string {
 	if e.TCBStatus == "" {
 		return ""
+	}
+	if len(e.AdvisoryIDs) > 0 {
+		return " TCB status " + e.TCBStatus + " (" + strings.Join(e.AdvisoryIDs, ", ") + ")."
 	}
 	return " TCB status " + e.TCBStatus + "."
 }
@@ -251,6 +316,11 @@ func (r chatRequest) validate() error {
 }
 
 func (s *server) chat(w http.ResponseWriter, r *http.Request) {
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		err := &privateai.Error{Code: privateai.CodeInvalidRequest, Message: "send the request as application/json"}
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]any{"error": errorView(err)})
+		return
+	}
 	var req chatRequest
 	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
 	if err == nil {
@@ -359,6 +429,7 @@ func verificationView(v *privateai.Verification) map[string]any {
 		"reasons":  v.Reasons,
 		"evidence": map[string]string{
 			"tcb_status":    e.TCBStatus,
+			"advisory_ids":  strings.Join(e.AdvisoryIDs, ", "),
 			"app_id":        e.AppID,
 			"compose_hash":  e.ComposeHash,
 			"os_image_hash": e.OSImageHash,

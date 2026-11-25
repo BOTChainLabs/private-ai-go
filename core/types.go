@@ -13,14 +13,18 @@ type ProviderID string
 const (
 	Phala ProviderID = "phala"
 	NEAR  ProviderID = "near"
+	// Gateway is a self-hosted gateway running Phala's open-source Private
+	// AI Gateway, verified against the identity its operator publishes.
+	Gateway ProviderID = "gateway"
 )
 
 // Status is the outcome of verifying one inference.
 type Status string
 
 const (
-	// Verified means every check passed: attestation, channel binding,
-	// response signature and route.
+	// Verified means every check passed: attestation, the binding of the
+	// request to attested keys (a pinned TLS key, end-to-end encryption, or
+	// both), the response signature and the route.
 	Verified Status = "Verified"
 	// Failed means evidence was present but did not check out.
 	Failed Status = "Failed"
@@ -42,9 +46,10 @@ type InferRequest struct {
 	Messages []Message
 	// Params is copied into the request body as is (temperature, max_tokens,
 	// tools, ...). Keys the SDK controls (model, messages, stream, and for
-	// Phala provider) are overwritten. With NEAR, message content and tools
-	// are encrypted to the model; other parameters reach the gateway in
-	// plaintext.
+	// Phala and Gateway provider) are overwritten. With NEAR, message content
+	// and tools are encrypted to the model; other parameters reach the
+	// gateway in plaintext. With E2EE to a Phala or Gateway gateway, message
+	// content is encrypted; parameters travel over TLS only.
 	Params map[string]any
 }
 
@@ -82,15 +87,29 @@ type Evidence struct {
 	ComposeHash string
 	OSImageHash string
 	TCBStatus   string
+	// AdvisoryIDs are the Intel security advisories (INTEL-SA-...) the TCB
+	// status refers to: for OutOfDate, the ones the platform lacks the
+	// fixes for.
+	AdvisoryIDs []string
 
 	// The response signature. For Phala, Receipt is the signed receipt and
 	// Keyset the canonical keyset whose key signed it, so the signature can
 	// be re-checked offline. For NEAR, Receipt is the model's signature.
 	KeysetDigest string // Phala
 	Keyset       json.RawMessage
-	ReceiptID    string
-	SessionID    string // Phala: the attested upstream session
-	Receipt      json.RawMessage
+	// ReceiptID is, for Phala, the receipt's own signed receipt_id once
+	// verified, and for NEAR the completion id the model signed.
+	ReceiptID string
+	SessionID string // Phala: the attested upstream session
+	Receipt   json.RawMessage
+
+	// E2EE is the suite message content was encrypted with to the attested
+	// gateway (Phala and Gateway), empty when only TLS protected it.
+	E2EE string
+	// TLSPinned reports that the connection was pinned to a TLS key the
+	// attestation lists (Phala and Gateway). A Gateway whose TLS ends
+	// outside its TEE is reached over ordinary TLS, with content under E2EE.
+	TLSPinned bool
 }
 
 // ModelEntry names a model at a provider.

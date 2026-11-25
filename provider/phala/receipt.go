@@ -23,8 +23,10 @@ func BodyHash(b []byte) string {
 }
 
 // VerifyReceipt checks a receipt against an established identity and the
-// exact request and response bytes (spec §9.3). Behind an aggregator it also
-// requires a verified, mandatory upstream TEE session.
+// exact request and response bytes (spec §9.3). It also requires a verified,
+// mandatory upstream TEE session, unless the receipt records no upstream
+// attempt and the identity is a direct service whose report came over a
+// pinned TLS key (see Identity.Serving).
 func VerifyReceipt(raw []byte, id *Identity, reqBody, respBody []byte) (*ReceiptResult, error) {
 	v, err := canon.Decode(raw)
 	if err != nil {
@@ -76,6 +78,7 @@ func VerifyReceipt(raw []byte, id *Identity, reqBody, respBody []byte) (*Receipt
 	// the one that served (§7.5). One must be verified; all must be
 	// required, since every request carries aci_verified.
 	var sawRequest, sawResponse, verifiedUpstream bool
+	var upstreamEvents int
 	var upstreamFailure any = "no upstream.verified event"
 	for i, e := range events {
 		ev, _ := e.(map[string]any)
@@ -94,6 +97,7 @@ func VerifyReceipt(raw []byte, id *Identity, reqBody, respBody []byte) (*Receipt
 			}
 			sawResponse = true
 		case "upstream.verified":
+			upstreamEvents++
 			if ev["required"] != true {
 				return nil, fmt.Errorf("upstream verification was not required for this request")
 			}
@@ -112,7 +116,16 @@ func VerifyReceipt(raw []byte, id *Identity, reqBody, respBody []byte) (*Receipt
 	if !sawRequest || !sawResponse {
 		return nil, fmt.Errorf("receipt is missing request.received or response.returned")
 	}
-	if id.Serving != "direct" && !verifiedUpstream {
+	// A direct service has no upstream hop, so its receipts carry no
+	// upstream.verified event (§7.5). Its serving mode is reported outside
+	// the attested keyset, so it is believed only when the report came over
+	// a TLS key the keyset lists: behind TLS that ends outside the TEE,
+	// whoever terminates it could rewrite it.
+	direct := id.Serving == "direct" && len(id.TLSPins) > 0
+	if !verifiedUpstream && (upstreamEvents > 0 || !direct) {
+		if upstreamEvents == 0 && id.Serving == "direct" {
+			upstreamFailure = "no upstream.verified event, and the reported direct serving is not trusted without a pinned TLS key"
+		}
 		return nil, fmt.Errorf("%v", upstreamFailure)
 	}
 	return res, nil

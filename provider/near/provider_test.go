@@ -29,6 +29,9 @@ type fakeClient struct {
 	verify    func(id string) (nearai.VerifiedCompletionResult, error)
 	src       *fakeSource
 	requests  atomic.Int32 // chat requests that reached the server
+	// unestablished makes the next Verify calls fail as NEAR's SDK does
+	// for a session on a machine not established yet.
+	unestablished atomic.Int32
 
 	mu       sync.Mutex
 	verified []string
@@ -36,7 +39,17 @@ type fakeClient struct {
 }
 
 func (f *fakeClient) Verify(context.Context, string) (nearai.AttestationVerificationResult, error) {
+	if f.unestablished.Load() > 0 {
+		f.unestablished.Add(-1)
+		return nearai.AttestationVerificationResult{}, gateRefusal()
+	}
 	return f.session, nil
+}
+
+// gateRefusal is the error NEAR's SDK returns when sessionOptions refuses a
+// quote from a machine not established yet.
+func gateRefusal() error {
+	return &nearai.Error{Code: "quote.verification_failed", Cause: fmt.Errorf("%w (RTMR3 00)", errUnestablished)}
 }
 
 // fakeSource serves the real NEAR attestations saved in testdata.
@@ -176,9 +189,10 @@ func verified(kind string) func(string) (nearai.VerifiedCompletionResult, error)
 			SignatureKind: kind,
 			Signature:     nearai.CompletionSignature{Kind: kind, Signature: "5167"},
 			Attestation: &nearai.VerifiedAttestation{
-				Signer:     fixtureModel().Signer,
-				TCBStatus:  "UpToDate",
-				Deployment: nearai.MeasuredDeployment{RuntimeMeasurements: nearai.RuntimeMeasurements{ComposeHash: "c0ffee"}},
+				Signer:      fixtureModel().Signer,
+				TCBStatus:   "OutOfDate",
+				AdvisoryIDs: []string{"INTEL-SA-01192"},
+				Deployment:  nearai.MeasuredDeployment{RuntimeMeasurements: nearai.RuntimeMeasurements{ComposeHash: "c0ffee"}},
 			},
 		}, nil
 	}
@@ -207,6 +221,9 @@ func TestInferVerified(t *testing.T) {
 	}
 	if v.Route != "near-provider-tee" || v.Evidence.ReceiptID != "chatcmpl-n1" || v.Evidence.ComposeHash != "c0ffee" || len(v.Evidence.Receipt) == 0 {
 		t.Fatalf("verification %+v", v)
+	}
+	if v.Evidence.TCBStatus != "OutOfDate" || len(v.Evidence.AdvisoryIDs) != 1 || v.Evidence.AdvisoryIDs[0] != "INTEL-SA-01192" {
+		t.Fatalf("TCB evidence %+v", v.Evidence)
 	}
 }
 
@@ -369,6 +386,22 @@ func TestNewBuildsGatewayClient(t *testing.T) {
 	if p.chatURL != "https://cloud-api.near.ai/v1/chat/completions" {
 		t.Fatalf("chat URL %s", p.chatURL)
 	}
+}
+
+// The API key goes out with the first attestation fetch, so a base URL
+// that is not https is refused before anything is sent.
+func TestNewRefusesPlainHTTP(t *testing.T) {
+	for _, u := range []string{"http://127.0.0.1:8080/v1", "ftp://cloud-api.near.ai/v1", "https://", "cloud-api.near.ai/v1"} {
+		if p, err := New(Options{APIKey: "k", BaseURL: u}); err == nil {
+			p.Close()
+			t.Errorf("accepted %q", u)
+		}
+	}
+	p, err := New(Options{APIKey: "k", BaseURL: "https://cloud-api.near.ai/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
 }
 
 // TestLive calls NEAR AI Cloud for real: attestation, E2EE, inference and
